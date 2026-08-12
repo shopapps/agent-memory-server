@@ -5,7 +5,7 @@
 
 A memory layer for AI agents.
 
-  **[Documentation](https://redis.github.io/agent-memory-server/)** • **[GitHub](https://github.com/redis/agent-memory-server)** • **[Docker](https://hub.docker.com/r/redislabs/agent-memory-server)**
+  **[Documentation](docs/index.md)** • **[GitHub](https://github.com/redis/agent-memory-server)** • **[Docker](https://hub.docker.com/r/redislabs/agent-memory-server)**
 
 </div>
 
@@ -154,7 +154,7 @@ results = await client.search_long_term_memory(
 )
 ```
 
-> **Note**: While you can call client functions directly as shown above, using **MCP or SDK-provided tool calls** is recommended for AI agents as it provides better integration, automatic context management, and follows AI-native patterns. For the best performance, you can add messages to working memory and allow the server to extract memories in the background. See **[Memory Integration Patterns](https://redis.github.io/agent-memory-server/memory-integration-patterns/)** for guidance on when to use each approach.
+> **Note**: While you can call client functions directly as shown above, using **MCP or SDK-provided tool calls** is recommended for AI agents as it provides better integration, automatic context management, and follows AI-native patterns. For the best performance, you can add messages to working memory and allow the server to extract memories in the background. See **[Memory Integration Patterns](docs/memory-integration-patterns.md)** for guidance on when to use each approach.
 
 
 #### LangChain Integration
@@ -254,24 +254,24 @@ export EMBEDDING_MODEL=ollama/nomic-embed-text
 export REDISVL_VECTOR_DIMENSIONS=768  # Required for Ollama
 ```
 
-See **[LLM Providers](https://redis.github.io/agent-memory-server/llm-providers/)** for complete configuration options.
+See **[LLM Providers](docs/llm-providers.md)** for complete configuration options.
 
 ## Documentation
 
-📚 **[Full Documentation](https://redis.github.io/agent-memory-server/)** - Complete guides, API reference, and examples
+📚 **[Full Documentation](docs/index.md)** - Complete guides, API reference, and examples
 
 ### Key Documentation Sections:
 
-- **[Quick Start Guide](https://redis.github.io/agent-memory-server/quick-start/)** - Get up and running in minutes
-- **[Python SDK](https://redis.github.io/agent-memory-server/python-sdk/)** - Complete SDK reference with examples
-- **[LangChain Integration](https://redis.github.io/agent-memory-server/langchain-integration/)** - Automatic tool conversion for LangChain
-- **[LLM Providers](https://redis.github.io/agent-memory-server/llm-providers/)** - Configure OpenAI, Anthropic, AWS Bedrock, Ollama, and more
-- **[Embedding Providers](https://redis.github.io/agent-memory-server/embedding-providers/)** - Configure embedding models for semantic search
-- **[Custom Memory Vector Databases](https://redis.github.io/agent-memory-server/custom-memory-vector-db/)** - Configure custom memory vector databases
-- **[Authentication](https://redis.github.io/agent-memory-server/authentication/)** - OAuth2/JWT setup for production
-- **[Memory Types](https://redis.github.io/agent-memory-server/long-term-memory/#memory-types)** - Understanding semantic vs episodic memory
-- **[API Reference](https://redis.github.io/agent-memory-server/api/)** - REST API endpoints
-- **[MCP Protocol](https://redis.github.io/agent-memory-server/mcp/)** - Model Context Protocol integration
+- **[Quick Start Guide](docs/quick-start.md)** - Get up and running in minutes
+- **[Python SDK](docs/python-sdk.md)** - Complete SDK reference with examples
+- **[LangChain Integration](docs/langchain-integration.md)** - Automatic tool conversion for LangChain
+- **[LLM Providers](docs/llm-providers.md)** - Configure OpenAI, Anthropic, AWS Bedrock, Ollama, and more
+- **[Embedding Providers](docs/embedding-providers.md)** - Configure embedding models for semantic search
+- **[Custom Memory Vector Databases](docs/custom-memory-vector-db.md)** - Configure custom memory vector databases
+- **[Authentication](docs/authentication.md)** - OAuth2/JWT setup for production
+- **[Memory Types](docs/long-term-memory.md#memory-types)** - Understanding semantic vs episodic memory
+- **[API Reference](docs/api.md)** - REST API endpoints
+- **[MCP Protocol](docs/mcp.md)** - Model Context Protocol integration
 
 ## Architecture
 

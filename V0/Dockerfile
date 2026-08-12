@@ -76,7 +76,7 @@ LABEL org.opencontainers.image.title="Redis Agent Memory Server"
 LABEL org.opencontainers.image.description="A memory layer for AI agents using Redis as the vector database. Provides REST API and MCP server interfaces with semantic search, topic extraction, and conversation summarization."
 LABEL org.opencontainers.image.url="https://github.com/redis/agent-memory-server"
 LABEL org.opencontainers.image.source="https://github.com/redis/agent-memory-server"
-LABEL org.opencontainers.image.documentation="https://redis.github.io/agent-memory-server/"
+LABEL org.opencontainers.image.documentation="https://github.com/redis/agent-memory-server/tree/main/V0/docs"
 LABEL org.opencontainers.image.vendor="Redis"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 

@@ -1,6 +1,6 @@
 # Agent Memory Client (JavaScript/TypeScript)
 
-A TypeScript/JavaScript client for the [Agent Memory Server](https://redis.github.io/agent-memory-server/) REST API.
+A TypeScript/JavaScript client for the [Agent Memory Server](../../README.md) REST API.
 
 ## Installation
 

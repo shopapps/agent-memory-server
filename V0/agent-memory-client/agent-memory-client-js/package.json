@@ -48,7 +48,7 @@
   "bugs": {
     "url": "https://github.com/redis/agent-memory-server/issues"
   },
-  "homepage": "https://redis.github.io/agent-memory-server/",
+  "homepage": "https://github.com/redis/agent-memory-server",
   "engines": {
     "node": ">=20.0.0"
   },

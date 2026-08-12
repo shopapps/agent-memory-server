@@ -121,7 +121,7 @@ async def create_memory_agent():
 - ✅ Session and user context automatically injected
 - ✅ Works seamlessly with LangChain agents
 
-See the [LangChain Integration Guide](https://redis.github.io/agent-memory-server/langchain-integration/) for more details.
+See the [LangChain Integration Guide](../docs/langchain-integration.md) for more details.
 
 ## Core API
 

@@ -66,7 +66,7 @@ LABEL org.opencontainers.image.title="Redis Agent Memory Server (Standalone)"
 LABEL org.opencontainers.image.description="All-in-one memory server with embedded Redis 8. Includes API server and background task worker."
 LABEL org.opencontainers.image.url="https://github.com/redis/agent-memory-server"
 LABEL org.opencontainers.image.source="https://github.com/redis/agent-memory-server"
-LABEL org.opencontainers.image.documentation="https://redis.github.io/agent-memory-server/"
+LABEL org.opencontainers.image.documentation="https://github.com/redis/agent-memory-server/tree/main/V0/docs"
 LABEL org.opencontainers.image.vendor="Redis"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 

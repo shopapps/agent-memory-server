@@ -41,7 +41,7 @@ For implementation details and usage examples, see:
 It serves as the research foundation and architectural starting point for Redis Agent Memory, but it is not the current supported production path.
 
 - **Start here:** [`V0/README.md`](./V0/README.md)
-- **Documentation:** https://redis.github.io/agent-memory-server/
+- **Documentation:** [`V0/docs/`](./V0/docs/index.md)
 - Build, test, and run everything from inside `V0/` (e.g. `cd V0 && make test`).
 
 ## License
