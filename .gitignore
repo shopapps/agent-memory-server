@@ -246,3 +246,9 @@ dev_docs/
 /V0/package.json
 /V0/package-lock.json
 .gitnexus
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
