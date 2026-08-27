@@ -16,6 +16,7 @@ const VALUE_FLAGS = new Map([
   ["--target", "agents"],
   ["--scope", "scope"],
   ["--project-dir", "projectDir"],
+  ["--namespace", "namespace"],
   ["--api-port", "apiPort"],
   ["--mcp-port", "mcpPort"],
 ]);
@@ -24,7 +25,22 @@ export function parseArgs(argv) {
   const args = [...argv];
   let command = "install";
 
-  if (args[0] && !args[0].startsWith("-")) {
+  if (args[0] === "rules") {
+    args.shift();
+    if (["--help", "-h"].includes(args[0])) {
+      command = "rules-install";
+    } else {
+      const action = args.shift();
+      if (!action || !["install", "uninstall", "update"].includes(action)) {
+        throw new InstallerError(
+          "E_BAD_COMMAND",
+          `Unknown rules command: ${action ?? "missing"}`,
+          "Use rules install, rules update, or rules uninstall.",
+        );
+      }
+      command = `rules-${action}`;
+    }
+  } else if (args[0] && !args[0].startsWith("-")) {
     command = args.shift();
     if (!COMMANDS.has(command)) {
       throw new InstallerError(
@@ -37,12 +53,14 @@ export function parseArgs(argv) {
 
   const options = {
     agents: null,
+    agentsSpecified: false,
     apiPort: null,
     dryRun: false,
     follow: false,
     help: false,
     json: false,
     mcpPort: null,
+    namespace: null,
     nonInteractive: false,
     projectDir: null,
     scope: null,
@@ -58,7 +76,11 @@ export function parseArgs(argv) {
       if (!value || value.startsWith("--")) {
         throw new InstallerError("E_BAD_OPTION", `${flag} needs a value.`);
       }
-      options[VALUE_FLAGS.get(flag)] = value;
+      const option = VALUE_FLAGS.get(flag);
+      options[option] = value;
+      if (option === "agents") {
+        options.agentsSpecified = true;
+      }
       continue;
     }
 
@@ -149,19 +171,23 @@ Usage:
   agent-memory [command] [options]
 
 Commands:
-  install      Install or repair the runtime, Skill, and MCP setup (default)
+  install      Install or repair the runtime, Skill, MCP, and agent rules (default)
+  rules install  Add safe shared-memory rules without changing the runtime
+  rules update   Update only the installer-owned shared-memory rules
+  rules uninstall Remove only installer-owned shared-memory rules
   status       Show the saved install and container state without changing it
   doctor       Run deeper read-only checks
   update       Pull and apply the release bundled with this CLI
   start        Start the managed Docker runtime
   stop         Stop the managed Docker runtime and keep its data
   logs         Show the last 200 Docker log lines
-  uninstall    Remove installer-owned client setup and keep memory data
+  uninstall    Remove installer-owned agent setup and keep memory data
 
 Options:
   --agents <auto|all|codex,claude>  Agents to configure
-  --scope <user|project>            Install for this user or one project
+  --scope <user|project>            Install globally for this user or in one project
   --project-dir <path>              Project directory for project scope
+  --namespace <name>                Fixed memory name for project scope
   --api-port <port>                 Local REST port (default: 8000)
   --mcp-port <port>                 Local MCP port (default: 9050)
   --dry-run                         Show the plan without changing anything

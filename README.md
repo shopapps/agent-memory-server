@@ -42,6 +42,11 @@ It serves as the research foundation and architectural starting point for Redis 
 
 - **Start here:** [`V0/README.md`](./V0/README.md)
 - **Quickstart and manual installation:** [`INSTALL.md`](./INSTALL.md)
+- **Current local command:** from this repository root, run
+  `npx --yes ./V0/installer`. The installer is not published to npm.
+- **Automatic agent rules:** the quickstart safely adds an owned block to the
+  active Codex `AGENTS.md` and Claude `CLAUDE.md`; see
+  [`INSTALL.md`](./INSTALL.md#use-the-rules-only-commands).
 - **Documentation:** [`V0/docs/`](./V0/docs/index.md)
 - **Local API docs after install:**
   [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)

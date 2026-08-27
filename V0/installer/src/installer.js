@@ -11,6 +11,14 @@ import {
   skillTargetPath,
 } from "./agents.js";
 import { InstallerError } from "./errors.js";
+import {
+  defaultProjectNamespace,
+  inspectRulesFile,
+  removeRulesFile,
+  rollbackRulesFile,
+  rulesTargetPaths,
+  upsertRulesFile,
+} from "./rules.js";
 
 export class Installer {
   constructor({ system, packageRoot, ui }) {
@@ -24,6 +32,11 @@ export class Installer {
       case "install":
       case "update":
         return this.install(options, command);
+      case "rules-install":
+      case "rules-update":
+        return this.installRulesOnly(options, command);
+      case "rules-uninstall":
+        return this.uninstallRulesOnly(options);
       case "status":
         return this.status();
       case "doctor":
@@ -46,13 +59,21 @@ export class Installer {
     return Boolean(state && state.phase !== "uninstalled");
   }
 
+  async hasSavedRules() {
+    const registry = await this.readRulesRegistry(this.paths());
+    return registry.installations.length > 0;
+  }
+
   async install(options, command = "install") {
     const manifest = await this.loadManifest();
     const paths = this.paths();
+    const rulesRegistry = await this.readRulesRegistry(paths);
     const savedState = await this.readState(paths);
     const existingState = savedState?.phase === "uninstalled" ? null : savedState;
     const scope = options.scope ?? existingState?.scope ?? "user";
-    const projectDir = path.resolve(options.projectDir ?? existingState?.projectDir ?? this.system.cwd);
+    let projectDir = path.resolve(
+      options.projectDir ?? existingState?.projectDir ?? this.system.cwd,
+    );
 
     if (existingState) {
       if (options.scope && options.scope !== existingState.scope) {
@@ -62,10 +83,15 @@ export class Installer {
           "Run uninstall first, then install again with the new scope.",
         );
       }
-      if (
-        options.projectDir
-        && path.resolve(options.projectDir) !== path.resolve(existingState.projectDir)
-      ) {
+    }
+
+    projectDir = await this.canonicalRulesProjectDir(scope, projectDir);
+    if (existingState && options.projectDir) {
+      const existingProjectDir = await this.canonicalRulesProjectDir(
+        existingState.scope,
+        existingState.projectDir,
+      );
+      if (projectDir !== existingProjectDir) {
         throw new InstallerError(
           "E_RECONFIGURE",
           "The project directory cannot be changed during a repair or update.",
@@ -74,18 +100,31 @@ export class Installer {
       }
     }
 
-    const detected = await this.preflightDocker();
+    const detected = await detectAgents(this.system);
     const agents = await this.resolveAgents(options.agents, existingState, detected);
+    const savedRules = this.findRulesInstallation(
+      rulesRegistry,
+      scope,
+      projectDir,
+    );
+    const namespace = this.resolveRulesNamespace(
+      scope,
+      projectDir,
+      options.namespace,
+      savedRules,
+    );
+    this.assertRulesNamespaceSelection(savedRules, namespace, agents);
+    const rulesPlan = await this.buildRulesPlan(
+      agents,
+      scope,
+      projectDir,
+      namespace,
+      savedRules,
+    );
+    await this.preflightDocker();
     const apiPort = options.apiPort ?? existingState?.apiPort ?? 8000;
     const mcpPort = options.mcpPort ?? existingState?.mcpPort ?? 9050;
     const mcpUrl = `http://127.0.0.1:${mcpPort}/mcp`;
-
-    if (scope === "project" && !(await this.system.lstatSafe(projectDir))) {
-      throw new InstallerError(
-        "E_PROJECT_MISSING",
-        `Project directory does not exist: ${projectDir}`,
-      );
-    }
 
     if (!existingState) {
       await this.assertPorts(apiPort, mcpPort);
@@ -105,6 +144,8 @@ export class Installer {
       command,
       dockerProject: manifest.composeProject,
       mcpUrl,
+      namespace,
+      ruleFiles: rulesPlan.files.map((file) => file.target),
       scope,
       serverVersion: manifest.serverVersion,
     };
@@ -114,6 +155,10 @@ export class Installer {
     this.ui.info(`  Scope: ${scope}`);
     this.ui.info(`  API: ${plan.apiUrl}`);
     this.ui.info(`  MCP: ${mcpUrl}`);
+    this.ui.info(`  Rules: ${rulesPlan.files.map((file) => file.target).join(", ")}`);
+    if (namespace) {
+      this.ui.info(`  Memory name: ${namespace}`);
+    }
 
     if (options.dryRun) {
       return { changed: false, dryRun: true, ok: true, plan };
@@ -194,6 +239,7 @@ export class Installer {
     await this.writeState(paths, state);
 
     const created = [];
+    let rulesResult = { files: [], operations: [] };
     try {
       for (const agent of agents) {
         const previousOwnership = existingState?.agents?.[agent];
@@ -213,7 +259,29 @@ export class Installer {
         };
         await this.writeState(paths, state);
       }
+
+      rulesResult = await this.applyRulesPlan(rulesPlan, paths.backups);
+      const installation = {
+        agents: [...new Set(rulesResult.files.flatMap((file) => file.agents))].sort(),
+        files: rulesResult.files,
+        key: this.rulesInstallationKey(scope, projectDir),
+        namespace,
+        projectDir,
+        scope,
+        updatedAt: this.system.now().toISOString(),
+      };
+      await this.writeRulesRegistry(
+        paths,
+        this.replaceRulesInstallation(rulesRegistry, installation),
+      );
+      await this.writeState(paths, state);
     } catch (error) {
+      await this.rollbackRulesOperations(rulesResult.operations, paths.backups);
+      try {
+        await this.writeRulesRegistry(paths, rulesRegistry);
+      } catch (registryError) {
+        this.ui.warn(`Rules state rollback warning: ${registryError.message}`);
+      }
       await this.rollbackClientChanges(created, clientOptions, paths);
       state.agents = savedAgents;
       state.phase = "client-registration-failed";
@@ -240,10 +308,138 @@ export class Installer {
       apiUrl: plan.apiUrl,
       changed: true,
       mcpUrl,
+      namespace,
       ok: true,
       providerConfigured,
       scope,
+      ruleFiles: rulesResult.files.map((file) => file.target),
       serverVersion: manifest.serverVersion,
+    };
+  }
+
+  async installRulesOnly(options, command) {
+    const paths = this.paths();
+    const registry = await this.readRulesRegistry(paths);
+    const savedState = await this.readState(paths);
+    const existingState = savedState?.phase === "uninstalled" ? null : savedState;
+    let scope;
+    let projectDir;
+    let savedRules = null;
+
+    if (options.scope || options.projectDir) {
+      scope = options.scope ?? "project";
+      projectDir = path.resolve(options.projectDir ?? this.system.cwd);
+    } else if (command === "rules-update" && existingState) {
+      scope = existingState.scope;
+      projectDir = path.resolve(existingState.projectDir);
+    } else if (command === "rules-update" && registry.installations.length === 1) {
+      [savedRules] = registry.installations;
+      scope = savedRules.scope;
+      projectDir = path.resolve(savedRules.projectDir);
+    } else if (command === "rules-update" && registry.installations.length > 1) {
+      throw new InstallerError(
+        "E_RULES_SELECTION",
+        "More than one shared-memory rules setup exists.",
+        "Choose one with --scope and, for project scope, --project-dir.",
+      );
+    } else {
+      scope = "user";
+      projectDir = path.resolve(this.system.cwd);
+      savedRules = this.findRulesInstallation(registry, scope, projectDir);
+    }
+
+    projectDir = await this.canonicalRulesProjectDir(scope, projectDir);
+    savedRules ??= this.findRulesInstallation(registry, scope, projectDir);
+
+    const runtimeProjectDir = existingState
+      ? await this.canonicalRulesProjectDir(
+          existingState.scope,
+          existingState.projectDir,
+        )
+      : null;
+    const runtimeMatches = existingState
+      && existingState.scope === scope
+      && runtimeProjectDir === projectDir;
+    let agents = options.agents
+      ?? savedRules?.agents
+      ?? (runtimeMatches ? Object.keys(existingState.agents ?? {}) : []);
+    if (agents.length === 0) {
+      agents = await detectAgents(this.system);
+    }
+    if (agents.length === 0) {
+      throw new InstallerError(
+        "E_NO_CLIENT",
+        "No supported agent was selected.",
+        "Use --agents codex, --agents claude, or --agents all.",
+      );
+    }
+
+    const namespace = this.resolveRulesNamespace(
+      scope,
+      projectDir,
+      options.namespace,
+      savedRules,
+    );
+    this.assertRulesNamespaceSelection(savedRules, namespace, agents);
+    const rulesPlan = await this.buildRulesPlan(
+      agents,
+      scope,
+      projectDir,
+      namespace,
+      savedRules,
+    );
+    const plan = {
+      agents,
+      command,
+      namespace,
+      projectDir,
+      ruleFiles: rulesPlan.files.map((file) => file.target),
+      scope,
+    };
+
+    this.ui.info(`${command === "rules-update" ? "Rules update" : "Rules install"} plan`);
+    this.ui.info(`  Agents: ${agents.join(", ")}`);
+    this.ui.info(`  Scope: ${scope}`);
+    this.ui.info(`  Files: ${plan.ruleFiles.join(", ")}`);
+    if (namespace) {
+      this.ui.info(`  Memory name: ${namespace}`);
+    }
+
+    if (options.dryRun) {
+      return { changed: false, dryRun: true, ok: true, plan };
+    }
+    if (!(await this.ui.confirm("Continue with this plan?", true))) {
+      return { cancelled: true, changed: false, ok: true, plan };
+    }
+
+    const result = await this.applyRulesPlan(rulesPlan, paths.backups);
+    try {
+      const installation = {
+        agents: [...new Set(result.files.flatMap((file) => file.agents))].sort(),
+        files: result.files,
+        key: this.rulesInstallationKey(scope, projectDir),
+        namespace,
+        projectDir,
+        scope,
+        updatedAt: this.system.now().toISOString(),
+      };
+      await this.writeRulesRegistry(
+        paths,
+        this.replaceRulesInstallation(registry, installation),
+      );
+    } catch (error) {
+      await this.rollbackRulesOperations(result.operations, paths.backups);
+      throw error;
+    }
+
+    return {
+      agents,
+      changed: result.changed,
+      namespace,
+      ok: true,
+      projectDir,
+      ruleFiles: result.files.map((file) => file.target),
+      scope,
     };
   }
 
@@ -268,6 +464,95 @@ export class Installer {
       ok: ps.code === 0 && apiHealthy && state.phase === "ready",
       phase: state.phase,
       state,
+    };
+  }
+
+  async uninstallRulesOnly(options) {
+    if (options.agentsSpecified || options.agents?.length > 0) {
+      throw new InstallerError(
+        "E_BAD_OPTION",
+        "--agents cannot be used with rules uninstall.",
+        "Choose the saved setup with --scope and --project-dir.",
+      );
+    }
+    const paths = this.paths();
+    const registry = await this.readRulesRegistry(paths);
+    let installation;
+
+    if (options.scope || options.projectDir) {
+      const scope = options.scope ?? "project";
+      const projectDir = await this.canonicalRulesProjectDir(
+        scope,
+        options.projectDir ?? this.system.cwd,
+      );
+      installation = this.findRulesInstallation(registry, scope, projectDir);
+    } else if (registry.installations.length === 1) {
+      [installation] = registry.installations;
+    } else if (registry.installations.length > 1) {
+      throw new InstallerError(
+        "E_RULES_SELECTION",
+        "More than one shared-memory rules setup exists.",
+        "Choose one with --scope and, for project scope, --project-dir.",
+      );
+    }
+
+    if (!installation) {
+      throw new InstallerError(
+        "E_RULES_NOT_INSTALLED",
+        "No matching shared-memory rules setup was found.",
+      );
+    }
+
+    const plan = {
+      projectDir: installation.projectDir,
+      ruleFiles: installation.files.map((file) => file.target),
+      scope: installation.scope,
+    };
+    this.ui.info("Rules uninstall plan");
+    this.ui.info(`  Scope: ${installation.scope}`);
+    this.ui.info(`  Files: ${plan.ruleFiles.join(", ")}`);
+
+    if (options.dryRun) {
+      return { changed: false, dryRun: true, ok: true, plan };
+    }
+    if (!(await this.ui.confirm("Continue with this plan?", true))) {
+      return { cancelled: true, changed: false, ok: true, plan };
+    }
+
+    const operations = [];
+    try {
+      for (const file of installation.files) {
+        const removed = await removeRulesFile(this.system, file.target, {
+          allowedRoot: installation.scope === "project"
+            ? installation.projectDir
+            : path.dirname(file.target),
+          backupDir: paths.backups,
+          created: file.created,
+          expectedActualPath: file.actualPath,
+          expectedBlockHash: file.hash,
+          placement: file.placement,
+        });
+        if (removed.changed) {
+          operations.push(removed);
+        }
+      }
+      await this.writeRulesRegistry(paths, {
+        installations: registry.installations.filter(
+          (item) => item.key !== installation.key,
+        ),
+        schemaVersion: 1,
+      });
+    } catch (error) {
+      await this.rollbackRulesOperations(operations, paths.backups);
+      throw error;
+    }
+
+    return {
+      changed: operations.length > 0,
+      ok: true,
+      projectDir: installation.projectDir,
+      ruleFiles: plan.ruleFiles,
+      scope: installation.scope,
     };
   }
 
@@ -303,6 +588,63 @@ export class Installer {
           checks.push({ name: `${agent} MCP`, ok: mcp.status === "matching" });
         } catch (error) {
           checks.push({ detail: error.message, name: `${agent} MCP`, ok: false });
+        }
+      }
+    }
+
+    const rulesRegistry = await this.readRulesRegistry(paths);
+    const body = await this.loadRulesBody();
+    for (const installation of rulesRegistry.installations) {
+      for (const file of installation.files) {
+        for (const agent of file.agents ?? []) {
+          try {
+            const activeTargets = await rulesTargetPaths(
+              this.system,
+              agent,
+              installation.scope,
+              installation.projectDir,
+            );
+            let activeRules = null;
+            for (const target of activeTargets) {
+              const allowedRoot = installation.scope === "project"
+                ? installation.projectDir
+                : path.dirname(target);
+              const rules = await inspectRulesFile(this.system, target, body, {
+                allowedRoot,
+                namespace: installation.namespace,
+                scope: installation.scope,
+              });
+              if (
+                path.resolve(rules.actualPath)
+                === path.resolve(file.actualPath)
+              ) {
+                activeRules = { rules, target };
+                break;
+              }
+            }
+            if (!activeRules) {
+              checks.push({
+                detail: "Another instruction file is now active. Run rules update.",
+                name: `${agent} rules ${file.target}`,
+                ok: false,
+              });
+              continue;
+            }
+            const unchangedBlock = activeRules.rules.blockHash === file.hash;
+            checks.push({
+              detail: !unchangedBlock
+                ? "managed block changed"
+                : activeRules.rules.status,
+              name: `${agent} rules ${activeRules.target}`,
+              ok: unchangedBlock && activeRules.rules.status === "matching",
+            });
+          } catch (error) {
+            checks.push({
+              detail: error.message,
+              name: `${agent} rules ${file.target}`,
+              ok: false,
+            });
+          }
         }
       }
     }
@@ -384,6 +726,54 @@ export class Installer {
       }
     }
 
+    const rulesRegistry = await this.readRulesRegistry(paths);
+    const rulesProjectDir = await this.canonicalRulesProjectDir(
+      state.scope,
+      state.projectDir,
+    );
+    const rulesInstallation = this.findRulesInstallation(
+      rulesRegistry,
+      state.scope,
+      rulesProjectDir,
+    );
+    let rulesRemoved = Boolean(rulesInstallation);
+    const removedRuleFiles = [];
+    for (const file of rulesInstallation?.files ?? []) {
+      try {
+        const removed = await removeRulesFile(this.system, file.target, {
+          allowedRoot: rulesInstallation.scope === "project"
+            ? rulesInstallation.projectDir
+            : path.dirname(file.target),
+          backupDir: paths.backups,
+          created: file.created,
+          expectedActualPath: file.actualPath,
+          expectedBlockHash: file.hash,
+          placement: file.placement,
+        });
+        if (removed.changed) {
+          removedRuleFiles.push(removed);
+        }
+      } catch (error) {
+        rulesRemoved = false;
+        warnings.push(`Shared-memory rules in ${file.target} were preserved: ${error.message}`);
+        await this.rollbackRulesOperations(removedRuleFiles, paths.backups);
+        break;
+      }
+    }
+    if (rulesRemoved) {
+      try {
+        await this.writeRulesRegistry(paths, {
+          installations: rulesRegistry.installations.filter(
+            (item) => item.key !== rulesInstallation.key,
+          ),
+          schemaVersion: 1,
+        });
+      } catch (error) {
+        await this.rollbackRulesOperations(removedRuleFiles, paths.backups);
+        throw error;
+      }
+    }
+
     const compose = this.composeCommand(paths, manifest);
     const down = await this.system.run("docker", [...compose, "down"], { env: this.system.env });
     if (down.code !== 0) {
@@ -396,6 +786,322 @@ export class Installer {
     return { changed: true, dataPreserved: true, ok: true, warnings };
   }
 
+  resolveRulesNamespace(scope, projectDir, requested, savedRules) {
+    if (scope === "user") {
+      if (requested) {
+        throw new InstallerError(
+          "E_BAD_NAMESPACE",
+          "A fixed namespace cannot be used by global rules.",
+          "Use project scope, or leave --namespace out so each repository gets its own memory name.",
+        );
+      }
+      return null;
+    }
+    return requested ?? savedRules?.namespace ?? defaultProjectNamespace(projectDir);
+  }
+
+  assertRulesNamespaceSelection(savedRules, namespace, agents) {
+    if (!savedRules || savedRules.namespace === namespace) {
+      return;
+    }
+    const selected = new Set(agents);
+    const missing = savedRules.agents.filter((agent) => !selected.has(agent));
+    if (missing.length > 0) {
+      throw new InstallerError(
+        "E_RECONFIGURE",
+        "The project memory name cannot change for only some saved agents.",
+        "Run again with --agents all so every saved agent gets the same name.",
+      );
+    }
+  }
+
+  async buildRulesPlan(agents, scope, projectDir, namespace, savedRules = null) {
+    const body = await this.loadRulesBody();
+    const files = [];
+    const byActualPath = new Map();
+    const activeTargets = new Map();
+    const selected = new Set(agents);
+    const preservedFiles = [];
+
+    for (const savedFile of savedRules?.files ?? []) {
+      const remainingAgents = savedFile.agents.filter((agent) => !selected.has(agent));
+      if (remainingAgents.length > 0) {
+        preservedFiles.push({ ...savedFile, agents: remainingAgents });
+      }
+    }
+
+    for (const agent of agents) {
+      const targets = await rulesTargetPaths(
+        this.system,
+        agent,
+        scope,
+        projectDir,
+      );
+      activeTargets.set(agent, targets);
+      for (const target of targets) {
+        const allowedRoot = scope === "project" ? projectDir : path.dirname(target);
+        const inspection = await inspectRulesFile(this.system, target, body, {
+          allowedRoot,
+          namespace,
+          scope,
+        });
+        const existing = byActualPath.get(inspection.actualPath);
+        if (existing) {
+          existing.agents.push(agent);
+          continue;
+        }
+        const savedFile = savedRules?.files?.find(
+          (item) => path.resolve(item.actualPath) === path.resolve(inspection.actualPath),
+        );
+        const file = {
+          actualPath: inspection.actualPath,
+          agents: [agent],
+          allowedRoot,
+          created: savedFile?.created ?? false,
+          expectedActualPath: inspection.actualPath,
+          expectedFileHash: inspection.fileHash,
+          placement: savedFile?.placement,
+          status: inspection.status,
+          target,
+        };
+        byActualPath.set(inspection.actualPath, file);
+        files.push(file);
+      }
+    }
+
+    const staleFiles = [];
+    const newActualPaths = new Set(files.map((file) => path.resolve(file.actualPath)));
+    for (const savedFile of savedRules?.files ?? []) {
+      const selectedAgents = savedFile.agents.filter((agent) => selected.has(agent));
+      const remainingAgents = savedFile.agents.filter((agent) => !selected.has(agent));
+      if (
+        selectedAgents.length === 0
+        || remainingAgents.length > 0
+        || newActualPaths.has(path.resolve(savedFile.actualPath))
+      ) {
+        continue;
+      }
+      const allowedRoot = scope === "project" ? projectDir : path.dirname(savedFile.target);
+      const inspection = await inspectRulesFile(
+        this.system,
+        savedFile.target,
+        body,
+        { allowedRoot, namespace, scope },
+      );
+      if (
+        path.resolve(inspection.actualPath) !== path.resolve(savedFile.actualPath)
+        || inspection.blockHash !== savedFile.hash
+      ) {
+        throw new InstallerError(
+          "E_RULES_CHANGED",
+          `The saved rules changed at ${savedFile.target}.`,
+          "Review that file before running rules update again.",
+        );
+      }
+      staleFiles.push({ ...savedFile, allowedRoot });
+    }
+
+    return {
+      activeTargets,
+      body,
+      files,
+      namespace,
+      preservedFiles,
+      projectDir,
+      scope,
+      staleFiles,
+    };
+  }
+
+  async applyRulesPlan(plan, backupDir) {
+    const applied = [];
+    const operations = [];
+    try {
+      for (const [agent, expectedTargets] of plan.activeTargets) {
+        const currentTargets = await rulesTargetPaths(
+          this.system,
+          agent,
+          plan.scope,
+          plan.projectDir,
+        );
+        if (JSON.stringify(currentTargets) !== JSON.stringify(expectedTargets)) {
+          throw new InstallerError(
+            "E_RULES_CHANGED",
+            `The active ${agent} instruction file changed during install.`,
+            "Run the command again so the new active file can be checked.",
+          );
+        }
+      }
+
+      for (const file of plan.files) {
+        const result = await upsertRulesFile(
+          this.system,
+          file.target,
+          plan.body,
+          {
+            allowedRoot: file.allowedRoot,
+            expectedActualPath: file.expectedActualPath,
+            expectedFileHash: file.expectedFileHash,
+            namespace: plan.namespace,
+            placement: file.placement,
+            scope: plan.scope,
+          },
+        );
+        applied.push({
+          ...result,
+          agents: file.agents,
+          created: Boolean(file.created || result.created),
+        });
+        if (result.changed) {
+          operations.push(result);
+        }
+      }
+
+      for (const staleFile of plan.staleFiles) {
+        const removed = await removeRulesFile(this.system, staleFile.target, {
+          allowedRoot: staleFile.allowedRoot,
+          backupDir,
+          created: staleFile.created,
+          expectedActualPath: staleFile.actualPath,
+          expectedBlockHash: staleFile.hash,
+          placement: staleFile.placement,
+        });
+        if (removed.changed) {
+          operations.push(removed);
+        }
+      }
+
+      const storedFiles = mergeRuleFiles([
+        ...plan.preservedFiles,
+        ...applied.map(({
+          actualPath,
+          agents: fileAgents,
+          created,
+          hash,
+          placement,
+          target,
+        }) => ({
+          actualPath,
+          agents: fileAgents,
+          created,
+          hash,
+          placement,
+          target,
+        })),
+      ]);
+      return {
+        changed: operations.length > 0,
+        files: storedFiles,
+        operations,
+      };
+    } catch (error) {
+      await this.rollbackRulesOperations(operations, backupDir);
+      throw error;
+    }
+  }
+
+  async rollbackRulesOperations(operations, backupDir) {
+    for (const result of [...operations].reverse()) {
+      try {
+        const rolledBack = await rollbackRulesFile(this.system, result, backupDir);
+        if (!rolledBack) {
+          this.ui.warn(`Rules rollback skipped because ${result.target} changed again.`);
+        }
+      } catch (rollbackError) {
+        this.ui.warn(`Rules rollback warning: ${rollbackError.message}`);
+      }
+    }
+  }
+
+  async loadRulesBody() {
+    return this.system.readFile(
+      path.join(this.packageRoot, "assets", "rules", "shared-memory.md"),
+      "utf8",
+    );
+  }
+
+  async readRulesRegistry(paths) {
+    if (!(await this.system.lstatSafe(paths.rulesState))) {
+      return { installations: [], schemaVersion: 1 };
+    }
+    const registry = JSON.parse(
+      await this.system.readFile(paths.rulesState, "utf8"),
+    );
+    const installations = [];
+    const keys = new Set();
+    for (const saved of Array.isArray(registry.installations)
+      ? registry.installations
+      : []) {
+      let projectDir = path.resolve(saved.projectDir);
+      if (saved.scope === "project" && await this.system.lstatSafe(projectDir)) {
+        projectDir = await this.system.realpath(projectDir);
+      }
+      const key = this.rulesInstallationKey(saved.scope, projectDir);
+      if (keys.has(key)) {
+        throw new InstallerError(
+          "E_RULES_CONFLICT",
+          "Two saved rules setups point to the same project.",
+          "Review the rules registry before changing those files.",
+        );
+      }
+      keys.add(key);
+      installations.push({ ...saved, key, projectDir });
+    }
+    return { installations, schemaVersion: 1 };
+  }
+
+  async canonicalRulesProjectDir(scope, projectDir) {
+    const resolved = path.resolve(projectDir);
+    if (scope !== "project") {
+      return resolved;
+    }
+    const stat = await this.system.lstatSafe(resolved);
+    if (!stat) {
+      throw new InstallerError(
+        "E_PROJECT_MISSING",
+        `Project directory does not exist: ${resolved}`,
+      );
+    }
+    const actual = await this.system.realpath(resolved);
+    const actualStat = await this.system.lstatSafe(actual);
+    if (!actualStat?.isDirectory()) {
+      throw new InstallerError(
+        "E_PROJECT_MISSING",
+        `Project path is not a directory: ${resolved}`,
+      );
+    }
+    return actual;
+  }
+
+  async writeRulesRegistry(paths, registry) {
+    await this.system.writeFileAtomic(
+      paths.rulesState,
+      `${JSON.stringify(registry, null, 2)}\n`,
+      0o600,
+    );
+  }
+
+  rulesInstallationKey(scope, projectDir) {
+    return scope === "user"
+      ? "user"
+      : `project:${path.resolve(projectDir)}`;
+  }
+
+  findRulesInstallation(registry, scope, projectDir) {
+    const key = this.rulesInstallationKey(scope, projectDir);
+    return registry.installations.find((item) => item.key === key) ?? null;
+  }
+
+  replaceRulesInstallation(registry, installation) {
+    return {
+      installations: [
+        ...registry.installations.filter((item) => item.key !== installation.key),
+        installation,
+      ],
+      schemaVersion: 1,
+    };
+  }
+
   paths() {
     const root = this.system.platform === "darwin"
       ? path.join(this.system.home, "Library", "Application Support", "Umony", "Agent Memory")
@@ -406,6 +1112,7 @@ export class Installer {
       compose: path.join(root, "compose.yaml"),
       root,
       runtimeEnv: path.join(root, "runtime.env"),
+      rulesState: path.join(root, "rules.json"),
       state: path.join(root, "install.json"),
     };
   }
@@ -446,7 +1153,6 @@ export class Installer {
       "Docker Desktop is not running.",
       "Open Docker Desktop, wait until it is ready, then run this command again.",
     );
-    return detectAgents(this.system);
   }
 
   async resolveAgents(requested, state, detected) {
@@ -648,6 +1354,27 @@ export class Installer {
       return { detail: error.message, name, ok: false };
     }
   }
+}
+
+function mergeRuleFiles(files) {
+  const merged = new Map();
+  for (const file of files) {
+    const key = path.resolve(file.actualPath);
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, {
+        ...file,
+        agents: [...new Set(file.agents)].sort(),
+      });
+      continue;
+    }
+    merged.set(key, {
+      ...existing,
+      ...file,
+      agents: [...new Set([...existing.agents, ...file.agents])].sort(),
+    });
+  }
+  return [...merged.values()];
 }
 
 export function mergeEnv(existing, updates) {

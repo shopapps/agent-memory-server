@@ -32,12 +32,14 @@ export async function main(argv, dependencies = {}) {
     const ui = createUi(system, prompter, parsed.options);
     const installer = new Installer({ packageRoot, system, ui });
     const hasSavedInstall = await installer.hasSavedInstall();
+    const hasSavedRules = await installer.hasSavedRules();
     await resolveGuidedOptions(
       parsed.command,
       parsed.options,
       system,
       prompter,
       hasSavedInstall,
+      hasSavedRules,
     );
     const result = await installer.run(parsed.command, parsed.options);
     printResult(system, parsed.command, parsed.options, result);
@@ -62,8 +64,29 @@ export async function main(argv, dependencies = {}) {
   }
 }
 
-async function resolveGuidedOptions(command, options, system, prompter, hasSavedInstall) {
-  if (command !== "install" || hasSavedInstall) {
+export async function resolveGuidedOptions(
+  command,
+  options,
+  system,
+  prompter,
+  hasSavedInstall,
+  hasSavedRules,
+) {
+  if (
+    options.projectDir
+    && !options.scope
+    && ["install", "rules-install", "rules-uninstall", "rules-update"].includes(command)
+  ) {
+    options.scope = "project";
+  }
+  const rulesOnly = ["rules-install", "rules-uninstall", "rules-update"].includes(command);
+  if ((!rulesOnly && command !== "install") || (command === "install" && hasSavedInstall)) {
+    return;
+  }
+  if (command === "rules-update" && (hasSavedInstall || hasSavedRules)) {
+    return;
+  }
+  if (command === "rules-uninstall") {
     return;
   }
 
@@ -71,7 +94,9 @@ async function resolveGuidedOptions(command, options, system, prompter, hasSaved
   if (!options.scope) {
     options.scope = interactive
       ? await prompter.select(
-          "Where should the Skill and MCP setup be installed?",
+          rulesOnly
+            ? "Where should the shared-memory rules be installed?"
+            : "Where should the Skill, MCP setup, and rules be installed?",
           [
             { label: "All projects for this user", value: "user" },
             { label: "Only the current project", value: "project" },
@@ -96,7 +121,7 @@ async function resolveGuidedOptions(command, options, system, prompter, hasSaved
     }
   }
 
-  if (!system.env.OPENAI_API_KEY && interactive) {
+  if (!rulesOnly && !system.env.OPENAI_API_KEY && interactive) {
     const wantsKey = await prompter.confirm(
       "Add an OpenAI API key now for the default model and embeddings?",
       false,
@@ -175,6 +200,21 @@ function printResult(system, command, options, result) {
     }
     return;
   }
+  if (["rules-install", "rules-update"].includes(command)) {
+    system.output.write("Shared-memory rules are ready.\n");
+    for (const file of result.ruleFiles) {
+      system.output.write(`Rules: ${file}\n`);
+    }
+    system.output.write("Start a new agent task so it loads the updated rules.\n");
+    return;
+  }
+  if (command === "rules-uninstall") {
+    system.output.write("Installer-owned shared-memory rules were removed.\n");
+    for (const file of result.ruleFiles) {
+      system.output.write(`Rules: ${file}\n`);
+    }
+    return;
+  }
   if (command === "uninstall") {
     system.output.write("Installer-owned setup removed. Redis memory data and secrets were kept.\n");
     for (const warning of result.warnings ?? []) {
@@ -209,13 +249,13 @@ function exitCodeForResult(command, result) {
 }
 
 function exitCodeForError(code) {
-  if (["E_BAD_AGENT", "E_BAD_COMMAND", "E_BAD_OPTION", "E_BAD_PORT", "E_BAD_SCOPE"].includes(code)) {
+  if (["E_BAD_AGENT", "E_BAD_COMMAND", "E_BAD_NAMESPACE", "E_BAD_OPTION", "E_BAD_PORT", "E_BAD_SCOPE"].includes(code)) {
     return 2;
   }
   if (["E_COMPOSE_MISSING", "E_DOCKER_MISSING", "E_DOCKER_STOPPED", "E_NO_CLIENT", "E_NODE_VERSION"].includes(code)) {
     return 3;
   }
-  if (["E_MCP_CONFLICT", "E_RECONFIGURE", "E_SKILL_CONFLICT"].includes(code)) {
+  if (["E_MCP_CONFLICT", "E_RECONFIGURE", "E_RULES_CHANGED", "E_RULES_CONFLICT", "E_RULES_SELECTION", "E_SKILL_CONFLICT"].includes(code)) {
     return 4;
   }
   if (code === "E_RELEASE_UNTRUSTED") {

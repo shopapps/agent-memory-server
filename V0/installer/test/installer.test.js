@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstat, mkdtemp, readFile, stat } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rename, stat, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -47,6 +47,16 @@ test("installs the runtime before adding client configuration", async () => {
   assert.equal((await stat(paths.runtimeEnv)).mode & 0o777, 0o600);
   assert.equal((await lstat(path.join(fixture.home, ".agents", "skills", "shared-memory"))).isSymbolicLink(), true);
   assert.equal((await lstat(path.join(fixture.home, ".claude", "skills", "shared-memory"))).isSymbolicLink(), true);
+  assert.match(
+    await readFile(path.join(fixture.home, ".codex", "AGENTS.md"), "utf8"),
+    /@umony\/agent-memory shared-memory rules/,
+  );
+  assert.match(
+    await readFile(path.join(fixture.home, ".claude", "CLAUDE.md"), "utf8"),
+    /@umony\/agent-memory shared-memory rules/,
+  );
+  const rulesState = JSON.parse(await readFile(paths.rulesState, "utf8"));
+  assert.equal(rulesState.installations[0].files.length, 2);
 });
 
 test("a failed Docker health gate does not add Skills or MCP entries", async () => {
@@ -71,6 +81,10 @@ test("a failed Docker health gate does not add Skills or MCP entries", async () 
     await fixture.system.lstatSafe(path.join(fixture.home, ".agents", "skills", "shared-memory")),
     null,
   );
+  assert.equal(
+    await fixture.system.lstatSafe(path.join(fixture.home, ".codex", "AGENTS.md")),
+    null,
+  );
   const cleanup = fixture.calls.find(
     (call) => call.command === "docker" && call.args.includes("down"),
   );
@@ -80,6 +94,8 @@ test("a failed Docker health gate does not add Skills or MCP entries", async () 
 
 test("uninstall removes only owned client entries and preserves the Docker volume", async () => {
   const fixture = await createFixture();
+  const rulesPath = path.join(fixture.home, ".codex", "AGENTS.md");
+  await fixture.system.writeFileAtomic(rulesPath, "# My own rules\n");
   await fixture.installer.run("install", {
     agents: ["codex"],
     apiPort: 8000,
@@ -97,6 +113,438 @@ test("uninstall removes only owned client entries and preserves the Docker volum
   assert.equal(down.args.includes("-v"), false);
   const state = JSON.parse(await readFile(fixture.installer.paths().state, "utf8"));
   assert.equal(state.phase, "uninstalled");
+  assert.equal(await readFile(rulesPath, "utf8"), "# My own rules\n");
+});
+
+test("rules-only install updates instruction files without touching Docker, MCP, or Skills", async () => {
+  const fixture = await createFixture();
+  const result = await fixture.installer.run("rules-install", {
+    agents: ["codex", "claude"],
+    dryRun: false,
+    namespace: "umony/acr",
+    projectDir: fixture.project,
+    scope: "project",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(fixture.calls.length, 0);
+  assert.match(
+    await readFile(path.join(fixture.project, "AGENTS.md"), "utf8"),
+    /Use `umony\/acr` as the project ID/,
+  );
+  assert.match(
+    await readFile(path.join(fixture.project, "CLAUDE.md"), "utf8"),
+    /Use `umony\/acr` as the project ID/,
+  );
+  assert.equal(
+    await fixture.system.lstatSafe(path.join(fixture.project, ".agents", "skills", "shared-memory")),
+    null,
+  );
+  const rulesState = JSON.parse(
+    await readFile(fixture.installer.paths().rulesState, "utf8"),
+  );
+  assert.equal(rulesState.installations.length, 1);
+  assert.equal(rulesState.installations[0].namespace, "umony/acr");
+});
+
+test("rules-only dry run changes no files or saved rules state", async () => {
+  const fixture = await createFixture();
+  const result = await fixture.installer.run("rules-install", {
+    agents: ["codex", "claude"],
+    dryRun: true,
+    namespace: "umony/acr",
+    projectDir: fixture.project,
+    scope: "project",
+  });
+
+  assert.equal(result.dryRun, true);
+  assert.equal(fixture.calls.length, 0);
+  assert.equal(await fixture.system.lstatSafe(path.join(fixture.project, "AGENTS.md")), null);
+  assert.equal(await fixture.system.lstatSafe(path.join(fixture.project, "CLAUDE.md")), null);
+  assert.equal(await fixture.system.lstatSafe(fixture.installer.paths().rulesState), null);
+});
+
+test("rules-only uninstall restores the original files without touching Docker", async () => {
+  const fixture = await createFixture();
+  const target = path.join(fixture.project, "AGENTS.md");
+  await fixture.system.writeFileAtomic(target, "# My project rules\n");
+  await fixture.installer.run("rules-install", {
+    agents: ["codex"],
+    namespace: "umony/acr",
+    projectDir: fixture.project,
+    scope: "project",
+  });
+
+  const result = await fixture.installer.run("rules-uninstall", {
+    projectDir: fixture.project,
+    scope: "project",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(await readFile(target, "utf8"), "# My project rules\n");
+  assert.equal(fixture.calls.length, 0);
+  const registry = JSON.parse(
+    await readFile(fixture.installer.paths().rulesState, "utf8"),
+  );
+  assert.equal(registry.installations.length, 0);
+});
+
+test("rules-only uninstall removes a rules file the installer created", async () => {
+  const fixture = await createFixture();
+  const target = path.join(fixture.project, "AGENTS.md");
+  await fixture.installer.run("rules-install", {
+    agents: ["codex"],
+    namespace: "umony/acr",
+    projectDir: fixture.project,
+    scope: "project",
+  });
+
+  await fixture.installer.run("rules-uninstall", {
+    projectDir: fixture.project,
+    scope: "project",
+  });
+
+  assert.equal(await fixture.system.lstatSafe(target), null);
+});
+
+test("rules-only uninstall keeps a user-owned empty rules file", async () => {
+  const fixture = await createFixture();
+  const target = path.join(fixture.project, "AGENTS.md");
+  await fixture.system.writeFileAtomic(target, "");
+  await fixture.installer.run("rules-install", {
+    agents: ["codex"],
+    namespace: "umony/acr",
+    projectDir: fixture.project,
+    scope: "project",
+  });
+
+  await fixture.installer.run("rules-uninstall", {
+    projectDir: fixture.project,
+    scope: "project",
+  });
+
+  assert.equal((await fixture.system.lstatSafe(target)).isFile(), true);
+  assert.equal(await readFile(target, "utf8"), "");
+});
+
+test("rules-only uninstall rejects an agent filter", async () => {
+  const fixture = await createFixture();
+  await fixture.installer.run("rules-install", {
+    agents: ["codex", "claude"],
+    namespace: "umony/acr",
+    projectDir: fixture.project,
+    scope: "project",
+  });
+
+  await assert.rejects(
+    fixture.installer.run("rules-uninstall", {
+      agents: ["codex"],
+      projectDir: fixture.project,
+      scope: "project",
+    }),
+    { code: "E_BAD_OPTION" },
+  );
+
+  assert.match(
+    await readFile(path.join(fixture.project, "AGENTS.md"), "utf8"),
+    /shared-memory rules/,
+  );
+  assert.match(
+    await readFile(path.join(fixture.project, "CLAUDE.md"), "utf8"),
+    /shared-memory rules/,
+  );
+
+  await assert.rejects(
+    fixture.installer.run("rules-uninstall", {
+      agents: null,
+      agentsSpecified: true,
+      projectDir: fixture.project,
+      scope: "project",
+    }),
+    { code: "E_BAD_OPTION" },
+  );
+});
+
+test("a linked and real project path share one rules setup", async () => {
+  const fixture = await createFixture();
+  const realProject = path.join(path.dirname(fixture.project), "real-lifecycle-project");
+  const linkedProject = path.join(path.dirname(fixture.project), "linked-lifecycle-project");
+  const target = path.join(realProject, "AGENTS.md");
+  await fixture.system.mkdir(realProject);
+  await fixture.system.writeFileAtomic(target, "# My rules\n");
+  await symlink(realProject, linkedProject, "dir");
+
+  await fixture.installer.run("rules-install", {
+    agents: ["codex"],
+    namespace: "umony/acr",
+    projectDir: linkedProject,
+    scope: "project",
+  });
+  await fixture.installer.run("rules-update", {
+    agents: ["codex"],
+    namespace: "umony/acr",
+    projectDir: realProject,
+    scope: "project",
+  });
+
+  let registry = JSON.parse(
+    await readFile(fixture.installer.paths().rulesState, "utf8"),
+  );
+  assert.equal(registry.installations.length, 1);
+  assert.equal(
+    registry.installations[0].projectDir,
+    await fixture.system.realpath(realProject),
+  );
+
+  await fixture.installer.run("rules-uninstall", {
+    projectDir: realProject,
+    scope: "project",
+  });
+
+  assert.equal(await readFile(target, "utf8"), "# My rules\n");
+  registry = JSON.parse(
+    await readFile(fixture.installer.paths().rulesState, "utf8"),
+  );
+  assert.equal(registry.installations.length, 0);
+});
+
+test("rules update for another project derives a new namespace", async () => {
+  const fixture = await createFixture();
+  await fixture.installer.run("install", {
+    agents: ["codex"],
+    apiPort: 8000,
+    mcpPort: 9050,
+    namespace: "umony/acr",
+    projectDir: fixture.project,
+    scope: "project",
+  });
+  const consoleProject = path.join(path.dirname(fixture.project), "umony-console");
+  await fixture.system.mkdir(consoleProject);
+
+  await fixture.installer.run("rules-update", {
+    agents: ["codex"],
+    projectDir: consoleProject,
+    scope: "project",
+  });
+
+  const content = await readFile(path.join(consoleProject, "AGENTS.md"), "utf8");
+  assert.match(content, /Use `umony-console` as the project ID/);
+  assert.doesNotMatch(content, /umony\/acr/);
+});
+
+test("updating one agent keeps the other agent rules tracked for uninstall", async () => {
+  const fixture = await createFixture();
+  await fixture.installer.run("install", {
+    agents: ["codex", "claude"],
+    apiPort: 8000,
+    mcpPort: 9050,
+    projectDir: fixture.project,
+    scope: "user",
+  });
+  await fixture.installer.run("rules-update", {
+    agents: ["codex"],
+    projectDir: fixture.project,
+    scope: "user",
+  });
+
+  const registry = JSON.parse(
+    await readFile(fixture.installer.paths().rulesState, "utf8"),
+  );
+  assert.deepEqual(registry.installations[0].agents, ["claude", "codex"]);
+  assert.equal(registry.installations[0].files.length, 2);
+
+  await fixture.installer.run("uninstall", {});
+  assert.equal(
+    await fixture.system.lstatSafe(path.join(fixture.home, ".codex", "AGENTS.md")),
+    null,
+  );
+  assert.equal(
+    await fixture.system.lstatSafe(path.join(fixture.home, ".claude", "CLAUDE.md")),
+    null,
+  );
+});
+
+test("a new namespace must update every saved agent", async () => {
+  const fixture = await createFixture();
+  await fixture.installer.run("rules-install", {
+    agents: ["codex", "claude"],
+    namespace: "old/name",
+    projectDir: fixture.project,
+    scope: "project",
+  });
+  const codexPath = path.join(fixture.project, "AGENTS.md");
+  const claudePath = path.join(fixture.project, "CLAUDE.md");
+  const beforeCodex = await readFile(codexPath, "utf8");
+  const beforeClaude = await readFile(claudePath, "utf8");
+
+  await assert.rejects(
+    fixture.installer.run("rules-update", {
+      agents: ["codex"],
+      namespace: "new/name",
+      projectDir: fixture.project,
+      scope: "project",
+    }),
+    { code: "E_RECONFIGURE" },
+  );
+
+  assert.equal(await readFile(codexPath, "utf8"), beforeCodex);
+  assert.equal(await readFile(claudePath, "utf8"), beforeClaude);
+  const registry = JSON.parse(
+    await readFile(fixture.installer.paths().rulesState, "utf8"),
+  );
+  assert.equal(registry.installations[0].namespace, "old/name");
+});
+
+test("shared rule files are deduplicated through a linked project path", async () => {
+  const fixture = await createFixture();
+  const realProject = path.join(path.dirname(fixture.project), "real-project");
+  const linkedProject = path.join(path.dirname(fixture.project), "linked-project");
+  await fixture.system.mkdir(realProject);
+  await fixture.system.writeFileAtomic(path.join(realProject, "AGENTS.md"), "# Shared\n");
+  await symlink("AGENTS.md", path.join(realProject, "CLAUDE.md"));
+  await symlink(realProject, linkedProject, "dir");
+
+  await fixture.installer.run("rules-install", {
+    agents: ["codex", "claude"],
+    namespace: "shared/project",
+    projectDir: linkedProject,
+    scope: "project",
+  });
+
+  const registry = JSON.parse(
+    await readFile(fixture.installer.paths().rulesState, "utf8"),
+  );
+  assert.equal(registry.installations[0].files.length, 1);
+  assert.deepEqual(registry.installations[0].files[0].agents, ["claude", "codex"]);
+  const content = await readFile(path.join(realProject, "AGENTS.md"), "utf8");
+  assert.equal(
+    (content.match(/shared-memory rules/g) ?? []).length,
+    2,
+  );
+});
+
+test("doctor spots one agent leaving a shared rule file", async () => {
+  const fixture = await createFixture();
+  const agentsPath = path.join(fixture.project, "AGENTS.md");
+  const claudePath = path.join(fixture.project, "CLAUDE.md");
+  await fixture.system.writeFileAtomic(agentsPath, "# Shared\n");
+  await symlink("AGENTS.md", claudePath);
+  await fixture.installer.run("rules-install", {
+    agents: ["codex", "claude"],
+    namespace: "shared/project",
+    projectDir: fixture.project,
+    scope: "project",
+  });
+  await rename(claudePath, path.join(fixture.project, "CLAUDE.old-link.md"));
+  await fixture.system.writeFileAtomic(claudePath, "# Claude now uses this file\n");
+
+  const result = await fixture.installer.run("doctor", {});
+  const claudeCheck = result.checks.find((check) => check.name.startsWith("claude rules"));
+
+  assert.equal(claudeCheck.ok, false);
+  assert.match(claudeCheck.detail, /Another instruction file is now active/);
+});
+
+test("uninstall preserves a managed block that was edited by hand", async () => {
+  const fixture = await createFixture();
+  await fixture.installer.run("install", {
+    agents: ["codex"],
+    apiPort: 8000,
+    mcpPort: 9050,
+    projectDir: fixture.project,
+    scope: "user",
+  });
+  const target = path.join(fixture.home, ".codex", "AGENTS.md");
+  const edited = (await readFile(target, "utf8")).replace(
+    "Before project work",
+    "Before every project task",
+  );
+  await fixture.system.writeFileAtomic(target, edited);
+
+  const result = await fixture.installer.run("uninstall", {});
+
+  assert.equal(result.warnings.some((warning) => warning.includes("were preserved")), true);
+  assert.equal(await readFile(target, "utf8"), edited);
+});
+
+test("rules update moves the managed block to a new active Codex override", async () => {
+  const fixture = await createFixture();
+  await fixture.installer.run("rules-install", {
+    agents: ["codex"],
+    namespace: "umony/acr",
+    projectDir: fixture.project,
+    scope: "project",
+  });
+  const base = path.join(fixture.project, "AGENTS.md");
+  const override = path.join(fixture.project, "AGENTS.override.md");
+  await fixture.system.writeFileAtomic(override, "# Temporary override\n");
+
+  await fixture.installer.run("rules-update", {
+    agents: ["codex"],
+    namespace: "umony/acr",
+    projectDir: fixture.project,
+    scope: "project",
+  });
+
+  assert.equal(await fixture.system.lstatSafe(base), null);
+  assert.match(await readFile(override, "utf8"), /shared-memory rules/);
+  const registry = JSON.parse(
+    await readFile(fixture.installer.paths().rulesState, "utf8"),
+  );
+  assert.equal(
+    registry.installations[0].files[0].target,
+    await fixture.system.realpath(override),
+  );
+});
+
+test("uninstall preserves rules when an instruction symlink was retargeted", async () => {
+  const fixture = await createFixture();
+  const codexDir = path.join(fixture.home, ".codex");
+  const target = path.join(codexDir, "AGENTS.md");
+  const first = path.join(codexDir, "first.md");
+  const second = path.join(codexDir, "second.md");
+  await fixture.system.writeFileAtomic(first, "# First\n");
+  await fixture.system.writeFileAtomic(second, "# Second\n");
+  await symlink("first.md", target);
+  await fixture.installer.run("install", {
+    agents: ["codex"],
+    apiPort: 8000,
+    mcpPort: 9050,
+    projectDir: fixture.project,
+    scope: "user",
+  });
+  await rename(target, path.join(codexDir, "AGENTS.old-link"));
+  await symlink("second.md", target);
+
+  const result = await fixture.installer.run("uninstall", {});
+
+  assert.equal(result.warnings.some((warning) => warning.includes("were preserved")), true);
+  assert.match(await readFile(first, "utf8"), /shared-memory rules/);
+  assert.equal(await readFile(second, "utf8"), "# Second\n");
+});
+
+test("a rules conflict stops a full install before Docker changes", async () => {
+  const fixture = await createFixture();
+  const rulesPath = path.join(fixture.home, ".codex", "AGENTS.md");
+  const broken = "<!-- >>> @umony/agent-memory shared-memory rules >>> -->\n";
+  await fixture.system.writeFileAtomic(rulesPath, broken);
+
+  await assert.rejects(
+    fixture.installer.run("install", {
+      agents: ["codex"],
+      apiPort: 8000,
+      mcpPort: 9050,
+      projectDir: fixture.project,
+      scope: "user",
+    }),
+    { code: "E_RULES_CONFLICT" },
+  );
+
+  assert.equal(
+    fixture.calls.some((call) => call.command === "docker"),
+    false,
+  );
+  assert.equal(await readFile(rulesPath, "utf8"), broken);
 });
 
 test("repeat install keeps ownership so uninstall can remove installer entries", async () => {

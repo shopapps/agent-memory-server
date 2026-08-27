@@ -11,17 +11,27 @@ The quickstart installs the server, Redis 8, the shared-memory Skill, and the
 MCP link used by Codex or Claude. MCP is the local link that lets an agent use
 the memory tools.
 
-After the npm package has been published, run:
+The installer package is kept in this repository. It is not published to npm.
 
-```bash
-npx --yes @umony/agent-memory@latest
-```
-
-The package is not on npm yet. From this repository, the same installer can be
-run now with:
+If you already have this repository, run this from its root:
 
 ```bash
 npx --yes ./V0/installer
+```
+
+For a new Mac, this single line clones the repository and runs the installer:
+
+```bash
+git clone https://github.com/shopapps/agent-memory-server.git && cd agent-memory-server && npx --yes ./V0/installer
+```
+
+Do not use `npx @umony/agent-memory@latest`. That name is not on npm and will
+return a `404 Not Found` error.
+
+To run it from another folder, use the full path to your checkout:
+
+```bash
+npx --yes /absolute/path/to/agent-memory-server/V0/installer --help
 ```
 
 The installer shows its plan before it changes anything. It then:
@@ -31,11 +41,36 @@ The installer shows its plan before it changes anything. It then:
 - starts Redis, the REST API, MCP, and the background worker;
 - adds the shared-memory Skill for Codex, Claude, or both;
 - adds the native MCP setting for each chosen agent;
+- adds a small shared-memory rule to each chosen agent's active instruction
+  file;
 - waits until the local server is healthy.
 
+The rule tells new agent tasks to search memory before project work and save
+new, checked facts afterwards. It sits inside clear start and end markers.
+Rerunning `install` or `update` replaces only that marked block. Text outside
+the block is left as it was. Broken or repeated markers stop the install before
+Docker is changed.
+
 No hooks are added. A hook is a script that runs when an agent event happens.
-Codex and Claude discover the Skill from their normal Skill folders and use
-their normal MCP settings, so hooks are not needed.
+The normal instruction file, Skill folder, and MCP setting are enough.
+
+The selected scope decides which instruction file is used:
+
+| Agent | All projects for this user | One project |
+| --- | --- | --- |
+| Codex | `${CODEX_HOME:-~/.codex}/AGENTS.md` | `<project>/AGENTS.md` |
+| Claude | `${CLAUDE_CONFIG_DIR:-~/.claude}/CLAUDE.md` | `<project>/CLAUDE.md` |
+
+Codex uses a non-empty `AGENTS.override.md` instead when one exists. For a
+Claude project, the installer keeps an existing `.claude/CLAUDE.md` if that is
+the file already in use. It does not scan or change nested rule files.
+Project-scope files are normal project files, so they may appear in Git for the
+team to review and share.
+
+Global rules choose a separate memory name for each Git repository. Project
+rules use the project folder name by default. Set an exact name with
+`--namespace umony/acr`. A namespace is simply the memory folder name shared
+by Codex and Claude.
 
 ### Quickstart needs and assumptions
 
@@ -44,7 +79,8 @@ their normal MCP settings, so hooks are not needed.
 - Node.js 20 or newer, with `npm` and `npx`.
 - Docker Desktop with Docker Compose, installed, open, and ready.
 - One supported command-line agent: Codex, Claude Code, or both.
-- Internet access to npm and Docker Hub.
+- Git and access to GitHub for the first clone.
+- Internet access to Docker Hub for the fixed container images.
 - Local ports `8000` and `9050` free. Other ports can be chosen with flags.
 - An OpenAI API key for the default model and embeddings. The server can start
   without it, but model-backed memory work cannot.
@@ -63,6 +99,8 @@ The installer stores its settings under:
 
 Its secret file is readable only by the current Mac user. Redis data lives in
 a named Docker volume. Both the data and secret file are kept by `uninstall`.
+Rule ownership is kept in `rules.json` in the same folder. It stores file
+paths, marker hashes, and placement details, not the contents of your files.
 
 ### Add an OpenAI key after install
 
@@ -75,20 +113,13 @@ In a Mac Terminal using `zsh`, run:
 read -s "OPENAI_API_KEY?OpenAI API key: "
 echo
 export OPENAI_API_KEY
-npx --yes @umony/agent-memory@latest install --yes
+npx --yes ./V0/installer install --yes
 unset OPENAI_API_KEY
 ```
 
 The key is hidden while you type it. The installer saves it in its protected
 settings file and restarts the Docker services. Do not paste a key into chat or
 save it in this repository.
-
-Until the npm package is published, replace the install line above with this
-command and run it from the repository root:
-
-```zsh
-npx --yes ./V0/installer install --yes
-```
 
 If the OpenAI dashboard only shows part of an old key, create a new secret key.
 OpenAI only shows the full value when the key is created. See the
@@ -108,53 +139,109 @@ The REST API starts at `http://127.0.0.1:8000`. The MCP link used by Codex and
 Claude starts at `http://127.0.0.1:9050/mcp`.
 
 If you chose different ports, use those port numbers instead. You can also run
-`npx --yes @umony/agent-memory@latest status` or `doctor` to check the install.
+the local `status` or `doctor` commands below to check the install.
 
 ### Useful CLI commands
 
-Use the same `npx --yes @umony/agent-memory@latest` prefix for each command:
+Run these from the repository root:
 
 ```bash
-npx --yes @umony/agent-memory@latest status
-npx --yes @umony/agent-memory@latest doctor
-npx --yes @umony/agent-memory@latest update
-npx --yes @umony/agent-memory@latest start
-npx --yes @umony/agent-memory@latest stop
-npx --yes @umony/agent-memory@latest logs
-npx --yes @umony/agent-memory@latest logs --follow
-npx --yes @umony/agent-memory@latest uninstall
+npx --yes ./V0/installer status
+npx --yes ./V0/installer doctor
+npx --yes ./V0/installer update
+npx --yes ./V0/installer rules install --agents all --scope user --yes
+npx --yes ./V0/installer rules update --agents all --scope user --yes
+npx --yes ./V0/installer rules uninstall --scope user --yes
+npx --yes ./V0/installer start
+npx --yes ./V0/installer stop
+npx --yes ./V0/installer logs
+npx --yes ./V0/installer logs --follow
+npx --yes ./V0/installer uninstall
 ```
-
-Until the npm package is published, replace that prefix with
-`npx --yes ./V0/installer` and run it from this repository root.
 
 For a team setup without questions:
 
 ```bash
-npx --yes @umony/agent-memory@latest install \
+npx --yes ./V0/installer install \
   --agents auto \
   --scope user \
   --yes \
   --non-interactive
 ```
 
-For one repository only, run this inside that repository:
+For one repository only, pass its full path while running the command from the
+`agent-memory-server` repository root:
 
 ```bash
-npx --yes @umony/agent-memory@latest install \
+npx --yes ./V0/installer install \
   --agents codex \
   --scope project \
-  --project-dir "$PWD" \
+  --project-dir "/path/to/your/project" \
+  --namespace umony/acr \
   --yes
 ```
 
-Use `--api-port 8100` or `--mcp-port 9150` if a default port is busy. Run
-`npx --yes @umony/agent-memory@latest --help` for every option.
+### Use the rules-only commands
 
-Before giving the public command to the team, publish this npm package and a
-matching project-owned server image, then update the fixed image digest in the
-release manifest. The current package pins the upstream `0.15.2` research
-image.
+The rules-only commands do not change Docker, MCP, the Skill, or saved
+memories. They also update their small ownership record in `rules.json`.
+
+To add or refresh only the agent rules for one repository, without touching
+Docker, MCP, the Skill, or saved memories, run:
+
+```bash
+npx --yes ./V0/installer rules update \
+  --agents all \
+  --scope project \
+  --project-dir "/path/to/your/project" \
+  --namespace umony/acr \
+  --yes
+```
+
+Use `rules install` the first time. The install and update commands are safe to
+rerun. Use `rules uninstall` to remove only the owned rules block. Start a new
+Codex or Claude task afterwards so the agent loads the changed file.
+The command remembers each global or project rules setup, so later updates use
+the same scope and memory name. If several project setups exist, pass
+`--project-dir` to choose one.
+
+On full uninstall, an unchanged owned block is removed and the file's original
+spacing is restored. If the block or a file link was changed by hand, the file
+is kept and a warning is shown.
+
+Use `--api-port 8100` or `--mcp-port 9150` if a default port is busy. Run
+`npx --yes ./V0/installer --help` for every option.
+
+### Optional local command
+
+You can add the local `agent-memory` command to your Mac. This uses a link to
+this checkout, so code changes here are used by the command:
+
+```bash
+cd V0/installer
+npm link
+agent-memory --help
+```
+
+After that, replace `npx --yes ./V0/installer` with `agent-memory` in the
+examples above. Run `npm unlink --global @umony/agent-memory` to remove the
+link. This is optional. It adds a global command and may clash with the Python
+server command, which is also named `agent-memory`. The local `npx` path is the
+safer choice.
+
+### Future npm release
+
+The package name is declared in `V0/installer/package.json`, but it is not
+available from the npm registry. Only after the team chooses to publish it will
+this command work:
+
+```bash
+npx --yes @umony/agent-memory@latest
+```
+
+Before publishing, build a matching project-owned server image and update the
+fixed image digest in the release manifest. The current package pins the
+upstream `0.15.2` research image.
 
 ## Manual source install
 
@@ -289,6 +376,25 @@ For a network MCP server instead:
 ```bash
 uv run agent-memory mcp --mode sse --port 9000 --task-backend asyncio
 ```
+
+### Add agent rules by hand
+
+For a manual setup, add this to the active `AGENTS.md` used by Codex and the
+active `CLAUDE.md` used by Claude:
+
+```md
+## Shared memory
+
+Before project work, use the `shared-memory` Skill to search for earlier
+decisions, fixes, rules, and handoff facts that may apply.
+
+After project work, save only new, checked facts that will help later. Keep
+tasks and work status in Beads or the project task tracker.
+```
+
+Use the global or project paths from the table above. The installer version has
+managed markers so it can update its own block without changing your other
+instructions.
 
 ### Run the checks
 

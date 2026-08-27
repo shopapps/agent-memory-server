@@ -44,3 +44,40 @@ test("rejects unknown agents and invalid ports", () => {
   assert.throws(() => parseArgs(["--agents", "cursor"]), { code: "E_BAD_AGENT" });
   assert.throws(() => parseArgs(["--api-port", "0"]), { code: "E_BAD_PORT" });
 });
+
+test("parses rules-only install, update, and uninstall commands", () => {
+  const install = parseArgs([
+    "rules",
+    "install",
+    "--agents",
+    "all",
+    "--scope",
+    "project",
+    "--project-dir",
+    "/tmp/project",
+    "--namespace",
+    "umony/acr",
+    "--yes",
+  ]);
+  const update = parseArgs(["rules", "update", "--agents", "codex"]);
+  const uninstall = parseArgs(["rules", "uninstall"]);
+  const uninstallAuto = parseArgs(["rules", "uninstall", "--agents", "auto"]);
+
+  assert.equal(install.command, "rules-install");
+  assert.deepEqual(install.options.agents, ["codex", "claude"]);
+  assert.equal(install.options.namespace, "umony/acr");
+  assert.equal(update.command, "rules-update");
+  assert.equal(uninstall.command, "rules-uninstall");
+  assert.equal(uninstallAuto.options.agents, null);
+  assert.equal(uninstallAuto.options.agentsSpecified, true);
+});
+
+test("rejects a missing or unknown rules action", () => {
+  assert.throws(() => parseArgs(["rules"]), { code: "E_BAD_COMMAND" });
+  assert.throws(() => parseArgs(["rules", "remove"]), { code: "E_BAD_COMMAND" });
+});
+
+test("allows help for the rules command group", () => {
+  const parsed = parseArgs(["rules", "--help"]);
+  assert.equal(parsed.options.help, true);
+});

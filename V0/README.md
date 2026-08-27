@@ -34,6 +34,14 @@ A memory layer for AI agents.
 For a guided Mac setup that starts Docker and connects Codex or Claude, see the
 [one-command quickstart and manual install guide](../INSTALL.md).
 
+From the repository root, the current local command is:
+
+```bash
+npx --yes ./V0/installer
+```
+
+The installer is not published to npm.
+
 After the server starts, open the local API docs at
 [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
