@@ -238,6 +238,9 @@ libs/redis/docs/.Trash*
 .omc/
 .omx/
 TASK_MEMORY.md
+
+# Local Beads task database and history
+/.beads/
 *.code-workspace
 /V0/agent-memory-client/agent-memory-client-java/.gradle/
 augment*.md
