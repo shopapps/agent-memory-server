@@ -1,13 +1,21 @@
 """Tests for working memory functionality."""
 
 import asyncio
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from pydantic import ValidationError
 
-from agent_memory_server.models import MemoryRecord, MemoryTypeEnum, WorkingMemory
+from agent_memory_server.models import (
+    MemoryRecord,
+    MemoryRecordResults,
+    MemoryTypeEnum,
+    WorkingMemory,
+)
+from agent_memory_server.scopes import SHARED_SCOPE
 from agent_memory_server.utils.keys import Keys
 from agent_memory_server.working_memory import (
+    _reconstruct_working_memory_from_long_term,
     cleanup_deprecated_sessions_zsets,
     delete_working_memory,
     get_working_memory,
@@ -17,6 +25,23 @@ from agent_memory_server.working_memory import (
 
 
 class TestWorkingMemory:
+    @pytest.mark.asyncio
+    async def test_reconstruction_treats_omitted_owner_scopes_as_shared(self):
+        empty_results = MemoryRecordResults(memories=[], total=0)
+
+        with patch(
+            "agent_memory_server.long_term_memory.search_long_term_memories",
+            new=AsyncMock(return_value=empty_results),
+        ) as search:
+            result = await _reconstruct_working_memory_from_long_term(
+                session_id="shared-session"
+            )
+
+        assert result is None
+        assert search.await_args.kwargs["user_id"].eq == SHARED_SCOPE
+        assert search.await_args.kwargs["project_id"].eq == SHARED_SCOPE
+        assert search.await_args.kwargs["agent_id"].eq == SHARED_SCOPE
+
     @pytest.mark.asyncio
     async def test_set_and_get_working_memory(self, async_redis_client):
         """Test setting and getting working memory"""
@@ -66,6 +91,32 @@ class TestWorkingMemory:
         assert retrieved_mem.memories[1].text == "User is working on a Python project"
         assert retrieved_mem.memories[1].id == "client-2"
         assert retrieved_mem.ttl_seconds == 1800  # Verify TTL is preserved
+
+    @pytest.mark.asyncio
+    async def test_set_and_get_working_memory_preserves_v1_scopes(
+        self, async_redis_client
+    ):
+        working_mem = WorkingMemory(
+            session_id="scoped-session",
+            namespace="coding/umony",
+            project_id="project-a",
+            user_id="user-a",
+            agent_id="agent-a",
+        )
+
+        await set_working_memory(working_mem, redis_client=async_redis_client)
+        retrieved = await get_working_memory(
+            session_id="scoped-session",
+            namespace="coding/umony",
+            project_id="project-a",
+            user_id="user-a",
+            agent_id="agent-a",
+            redis_client=async_redis_client,
+        )
+
+        assert retrieved is not None
+        assert retrieved.project_id == "project-a"
+        assert retrieved.agent_id == "agent-a"
 
     @pytest.mark.asyncio
     async def test_get_nonexistent_working_memory(self, async_redis_client):
@@ -123,6 +174,183 @@ class TestWorkingMemory:
             redis_client=async_redis_client,
         )
         assert retrieved_mem is None
+
+    @pytest.mark.asyncio
+    async def test_scoped_rewrite_removes_legacy_key_before_later_delete(
+        self, async_redis_client
+    ):
+        if async_redis_client is None:
+            pytest.skip("Redis not available")
+
+        session_id = "legacy-scoped-session"
+        namespace = "coding/umony"
+        project_id = "project-a"
+        agent_id = "agent-a"
+        legacy_key = Keys.legacy_working_memory_key(
+            session_id=session_id,
+            namespace=namespace,
+        )
+        scoped_key = Keys.working_memory_key(
+            session_id=session_id,
+            namespace=namespace,
+            project_id=project_id,
+            agent_id=agent_id,
+        )
+        legacy_data = {
+            "messages": [],
+            "memories": [],
+            "context": None,
+            "user_id": None,
+            "project_id": project_id,
+            "agent_id": agent_id,
+            "tokens": 0,
+            "session_id": session_id,
+            "namespace": namespace,
+            "ttl_seconds": None,
+            "data": {},
+            "long_term_memory_strategy": {"strategy": "discrete", "config": {}},
+            "last_accessed": 1704067200,
+            "created_at": 1704067200,
+            "updated_at": 1704067200,
+        }
+        await async_redis_client.json().set(legacy_key, "$", legacy_data)
+
+        omitted_scopes = await get_working_memory(
+            session_id=session_id,
+            namespace=namespace,
+            redis_client=async_redis_client,
+        )
+        assert omitted_scopes is None
+
+        migrated = await get_working_memory(
+            session_id=session_id,
+            namespace=namespace,
+            project_id=project_id,
+            agent_id=agent_id,
+            redis_client=async_redis_client,
+        )
+        assert migrated is not None
+        assert migrated.project_id == project_id
+        assert migrated.agent_id == agent_id
+
+        await set_working_memory(migrated, redis_client=async_redis_client)
+
+        assert await async_redis_client.exists(scoped_key) == 1
+        assert await async_redis_client.exists(legacy_key) == 0
+
+        await delete_working_memory(
+            session_id=session_id,
+            namespace=namespace,
+            project_id=project_id,
+            agent_id=agent_id,
+            redis_client=async_redis_client,
+        )
+
+        assert (
+            await get_working_memory(
+                session_id=session_id,
+                namespace=namespace,
+                redis_client=async_redis_client,
+            )
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_private_write_keeps_distinct_shared_legacy_memory(
+        self, async_redis_client
+    ):
+        session_id = "shared-legacy-session"
+        namespace = "coding/umony"
+        legacy_key = Keys.legacy_working_memory_key(
+            session_id=session_id,
+            namespace=namespace,
+        )
+        await async_redis_client.json().set(
+            legacy_key,
+            "$",
+            {
+                "session_id": session_id,
+                "namespace": namespace,
+                "user_id": None,
+                "project_id": None,
+                "agent_id": None,
+                "context": "shared",
+            },
+        )
+
+        private = WorkingMemory(
+            session_id=session_id,
+            namespace=namespace,
+            project_id="project-a",
+            agent_id="agent-a",
+            context="private",
+        )
+        await set_working_memory(private, redis_client=async_redis_client)
+
+        assert await async_redis_client.exists(legacy_key) == 1
+        assert (
+            await async_redis_client.exists(
+                Keys.working_memory_key(
+                    session_id=session_id,
+                    namespace=namespace,
+                    project_id="project-a",
+                    agent_id="agent-a",
+                )
+            )
+            == 1
+        )
+
+    @pytest.mark.asyncio
+    async def test_legacy_key_collision_does_not_cross_namespace_or_session(
+        self, async_redis_client
+    ):
+        """A colon in old key parts must not expose a different session."""
+        stored_namespace = "legacy-a"
+        stored_session_id = "legacy-b:c"
+        legacy_key = Keys.legacy_working_memory_key(
+            session_id=stored_session_id,
+            namespace=stored_namespace,
+        )
+        await async_redis_client.json().set(
+            legacy_key,
+            "$",
+            {
+                "session_id": stored_session_id,
+                "namespace": stored_namespace,
+                "user_id": None,
+                "project_id": None,
+                "agent_id": None,
+                "messages": [],
+                "memories": [],
+                "context": "stored session",
+            },
+        )
+
+        colliding_namespace = "legacy-a:legacy-b"
+        colliding_session_id = "c"
+        assert (
+            await get_working_memory(
+                session_id=colliding_session_id,
+                namespace=colliding_namespace,
+                redis_client=async_redis_client,
+            )
+            is None
+        )
+
+        await delete_working_memory(
+            session_id=colliding_session_id,
+            namespace=colliding_namespace,
+            redis_client=async_redis_client,
+        )
+
+        assert await async_redis_client.exists(legacy_key) == 1
+        exact = await get_working_memory(
+            session_id=stored_session_id,
+            namespace=stored_namespace,
+            redis_client=async_redis_client,
+        )
+        assert exact is not None
+        assert exact.context == "stored session"
 
     @pytest.mark.asyncio
     async def test_working_memory_validation(self, async_redis_client):
@@ -393,7 +621,11 @@ class TestWorkingMemory:
         }
 
         # Store as old string format directly
-        key = Keys.working_memory_key(session_id=session_id, namespace=namespace)
+        key = Keys.legacy_working_memory_key(
+            session_id=session_id,
+            namespace=namespace,
+            user_id="user123",
+        )
         await async_redis_client.set(key, json.dumps(old_format_data))
 
         # Verify it's stored as string (not JSON)
@@ -411,6 +643,7 @@ class TestWorkingMemory:
         retrieved_mem = await get_working_memory(
             session_id=session_id,
             namespace=namespace,
+            user_id="user123",
             redis_client=async_redis_client,
         )
 
@@ -437,6 +670,7 @@ class TestWorkingMemory:
         retrieved_again = await get_working_memory(
             session_id=session_id,
             namespace=namespace,
+            user_id="user123",
             redis_client=async_redis_client,
         )
         assert retrieved_again is not None
@@ -898,3 +1132,73 @@ class TestWorkingMemory:
         assert set(listed_sessions) == set(user1_sessions), (
             f"Expected {user1_sessions}, got {listed_sessions}"
         )
+
+    @pytest.mark.asyncio
+    async def test_list_sessions_treats_omitted_owner_scopes_as_shared(
+        self, async_redis_client
+    ):
+        """Missing owner IDs must not list another owner's sessions."""
+        namespace = "shared_owner_list_namespace"
+        memories = [
+            WorkingMemory(session_id="fully-shared", namespace=namespace),
+            WorkingMemory(
+                session_id="private-user",
+                namespace=namespace,
+                user_id="user-a",
+            ),
+            WorkingMemory(
+                session_id="private-project",
+                namespace=namespace,
+                project_id="project-a",
+            ),
+            WorkingMemory(
+                session_id="private-agent",
+                namespace=namespace,
+                agent_id="agent-a",
+            ),
+        ]
+        for memory in memories:
+            await set_working_memory(memory, redis_client=async_redis_client)
+
+        total, sessions = await list_sessions(
+            redis=async_redis_client,
+            namespace=namespace,
+            limit=10,
+            offset=0,
+        )
+
+        assert total == 1
+        assert sessions == ["fully-shared"]
+
+    @pytest.mark.asyncio
+    async def test_list_sessions_keeps_legacy_null_scopes_visible_as_shared(
+        self, async_redis_client
+    ):
+        """Old shared JSON used null owner fields instead of the sentinel."""
+        namespace = "legacy_shared_list_namespace"
+        session_id = "legacy-shared-session"
+        key = Keys.working_memory_key(
+            session_id=session_id,
+            namespace=namespace,
+        )
+        await async_redis_client.json().set(
+            key,
+            "$",
+            {
+                "session_id": session_id,
+                "namespace": namespace,
+                "user_id": None,
+                "project_id": None,
+                "agent_id": None,
+            },
+        )
+
+        total, sessions = await list_sessions(
+            redis=async_redis_client,
+            namespace=namespace,
+            limit=10,
+            offset=0,
+        )
+
+        assert total == 1
+        assert sessions == [session_id]

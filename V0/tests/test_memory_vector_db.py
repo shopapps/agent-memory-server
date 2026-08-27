@@ -48,6 +48,69 @@ class MockEmbeddings:
 class TestMemoryVectorDatabase:
     """Test cases for MemoryVectorDatabase functionality."""
 
+    @pytest.mark.asyncio
+    async def test_existing_index_is_rebuilt_for_v1_scope_fields(self):
+        """An old search index should gain the new scope fields in place."""
+        mock_index = MagicMock()
+        mock_index.exists = AsyncMock(return_value=True)
+        mock_index.info = AsyncMock(
+            return_value={
+                "attributes": [["identifier", "session_id", "attribute", "session_id"]]
+            }
+        )
+        mock_index.create = AsyncMock()
+
+        db = RedisVLMemoryVectorDatabase(mock_index, MockEmbeddings())
+
+        await db._ensure_index()
+
+        mock_index.create.assert_awaited_once_with(overwrite=True, drop=False)
+
+    @pytest.mark.asyncio
+    async def test_existing_v1_index_is_left_alone(self):
+        """A current search index should not be rebuilt on first use."""
+        mock_index = MagicMock()
+        mock_index.exists = AsyncMock(return_value=True)
+        mock_index.info = AsyncMock(
+            return_value={
+                "attributes": [
+                    ["identifier", "project_id", "attribute", "project_id"],
+                    ["identifier", "agent_id", "attribute", "agent_id"],
+                ]
+            }
+        )
+        mock_index.create = AsyncMock()
+
+        db = RedisVLMemoryVectorDatabase(mock_index, MockEmbeddings())
+
+        await db._ensure_index()
+
+        mock_index.create.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_index_upgrade_accepts_other_process_success(self):
+        """A losing upgrader should accept the schema created by its peer."""
+        mock_index = MagicMock()
+        mock_index.exists = AsyncMock(return_value=True)
+        mock_index.info = AsyncMock(
+            side_effect=[
+                {"attributes": [{"attribute": "session_id"}]},
+                {
+                    "attributes": [
+                        {"attribute": "project_id"},
+                        {"attribute": "agent_id"},
+                    ]
+                },
+            ]
+        )
+        mock_index.create = AsyncMock(side_effect=RuntimeError("index changed"))
+
+        db = RedisVLMemoryVectorDatabase(mock_index, MockEmbeddings())
+
+        await db._ensure_index()
+
+        assert db._index_created is True
+
     def test_memory_hash_generation(self):
         """Test memory hash generation."""
         # Create a concrete implementation for testing
@@ -250,7 +313,13 @@ class TestMemoryVectorDatabase:
         """Test adding memories to a mock index."""
         mock_index = MagicMock()
         mock_index.exists = AsyncMock(return_value=True)
+        mock_index.info = AsyncMock(
+            return_value={
+                "attributes": [{"attribute": "project_id"}, {"attribute": "agent_id"}]
+            }
+        )
         mock_index.load = AsyncMock(return_value=["key1", "key2"])
+        mock_index.fetch = AsyncMock(return_value=None)
         mock_embeddings = MockEmbeddings()
 
         db = RedisVLMemoryVectorDatabase(mock_index, mock_embeddings)
@@ -294,7 +363,13 @@ class TestMemoryVectorDatabase:
         """Test update_memories method calls add_memories."""
         mock_index = MagicMock()
         mock_index.exists = AsyncMock(return_value=True)
+        mock_index.info = AsyncMock(
+            return_value={
+                "attributes": [{"attribute": "project_id"}, {"attribute": "agent_id"}]
+            }
+        )
         mock_index.load = AsyncMock(return_value=["key1", "key2"])
+        mock_index.fetch = AsyncMock(return_value=None)
         mock_embeddings = MockEmbeddings()
 
         db = RedisVLMemoryVectorDatabase(mock_index, mock_embeddings)
@@ -336,6 +411,11 @@ class TestMemoryVectorDatabase:
         """Test delete_memories calls drop_documents."""
         mock_index = MagicMock()
         mock_index.exists = AsyncMock(return_value=True)
+        mock_index.info = AsyncMock(
+            return_value={
+                "attributes": [{"attribute": "project_id"}, {"attribute": "agent_id"}]
+            }
+        )
         mock_index.drop_documents = AsyncMock(return_value=2)
         mock_embeddings = MockEmbeddings()
 
@@ -351,6 +431,11 @@ class TestMemoryVectorDatabase:
         """Test keyword search uses TextQuery and normalizes scores."""
         mock_index = MagicMock()
         mock_index.exists = AsyncMock(return_value=True)
+        mock_index.info = AsyncMock(
+            return_value={
+                "attributes": [{"attribute": "project_id"}, {"attribute": "agent_id"}]
+            }
+        )
         mock_index.query = AsyncMock(
             return_value=[
                 {
@@ -392,6 +477,11 @@ class TestMemoryVectorDatabase:
         """Test hybrid search uses aggregate queries and normalizes scores."""
         mock_index = MagicMock()
         mock_index.exists = AsyncMock(return_value=True)
+        mock_index.info = AsyncMock(
+            return_value={
+                "attributes": [{"attribute": "project_id"}, {"attribute": "agent_id"}]
+            }
+        )
         mock_index.aggregate = AsyncMock(
             return_value=MagicMock(
                 rows=[
@@ -435,6 +525,11 @@ class TestMemoryVectorDatabase:
         """Test hybrid search handles alternating key/value aggregate rows."""
         mock_index = MagicMock()
         mock_index.exists = AsyncMock(return_value=True)
+        mock_index.info = AsyncMock(
+            return_value={
+                "attributes": [{"attribute": "project_id"}, {"attribute": "agent_id"}]
+            }
+        )
         mock_index.aggregate = AsyncMock(
             return_value=MagicMock(
                 rows=[
@@ -505,6 +600,11 @@ class TestMemoryVectorDatabase:
         """Quoted phrases in hybrid mode should become required lexical clauses."""
         mock_index = MagicMock()
         mock_index.exists = AsyncMock(return_value=True)
+        mock_index.info = AsyncMock(
+            return_value={
+                "attributes": [{"attribute": "project_id"}, {"attribute": "agent_id"}]
+            }
+        )
         mock_index.aggregate = AsyncMock(return_value=MagicMock(rows=[]))
         mock_embeddings = MockEmbeddings()
         mock_embeddings.aembed_query = AsyncMock(return_value=[0.1] * 1536)
@@ -534,6 +634,11 @@ class TestMemoryVectorDatabase:
         """Non-semantic searches should log when server-side recency degrades."""
         mock_index = MagicMock()
         mock_index.exists = AsyncMock(return_value=True)
+        mock_index.info = AsyncMock(
+            return_value={
+                "attributes": [{"attribute": "project_id"}, {"attribute": "agent_id"}]
+            }
+        )
         mock_index.query = AsyncMock(return_value=[])
         mock_index.aggregate = AsyncMock(return_value=MagicMock(rows=[]))
         mock_embeddings = MockEmbeddings()
@@ -708,6 +813,11 @@ class TestMemoryVectorDatabase:
         """Filter-only listings should keep neutral distance semantics."""
         mock_index = MagicMock()
         mock_index.exists = AsyncMock(return_value=True)
+        mock_index.info = AsyncMock(
+            return_value={
+                "attributes": [{"attribute": "project_id"}, {"attribute": "agent_id"}]
+            }
+        )
         mock_index.query = AsyncMock(
             return_value=[
                 {

@@ -66,6 +66,8 @@ def install_controlled_memory_db(
             {"name": "text", "type": "text"},
             {"name": "session_id", "type": "tag"},
             {"name": "user_id", "type": "tag"},
+            {"name": "project_id", "type": "tag"},
+            {"name": "agent_id", "type": "tag"},
             {"name": "namespace", "type": "tag"},
             {"name": "memory_type", "type": "tag"},
             {"name": "topics", "type": "tag"},

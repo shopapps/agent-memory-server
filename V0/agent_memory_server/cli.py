@@ -17,10 +17,12 @@ from agent_memory_server.logging import (
     configure_mcp_logging,
     get_logger,
 )
+from agent_memory_server.memory_vector_db_factory import ensure_redis_memory_index
 from agent_memory_server.migrations import (
     migrate_add_discrete_memory_extracted_2,
     migrate_add_memory_hashes_1,
     migrate_add_memory_type_3,
+    migrate_add_scope_fields_5,
     migrate_normalize_tag_separators_4,
 )
 from agent_memory_server.utils.redis import (
@@ -100,9 +102,11 @@ def migrate_memories():
             migrate_add_discrete_memory_extracted_2,
             migrate_add_memory_type_3,
             migrate_normalize_tag_separators_4,
+            migrate_add_scope_fields_5,
         ]
         for migration in migrations:
             await migration(redis=redis)
+        await ensure_redis_memory_index(redis)
 
     asyncio.run(run_migrations())
 

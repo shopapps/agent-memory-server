@@ -190,6 +190,52 @@ class TestLongTermMemory:
         assert stored_memory.pinned is False
 
     @pytest.mark.asyncio
+    async def test_update_long_term_memory_allows_project_and_agent_scope(self):
+        existing_memory = MemoryRecord(
+            id="memory-1",
+            text="Original memory",
+            project_id="project-old",
+            agent_id="agent-old",
+        )
+        mock_adapter = AsyncMock()
+
+        with (
+            patch(
+                "agent_memory_server.long_term_memory.get_long_term_memory_by_id",
+                new=AsyncMock(return_value=existing_memory),
+            ),
+            patch(
+                "agent_memory_server.long_term_memory.get_memory_vector_db",
+                new=AsyncMock(return_value=mock_adapter),
+            ),
+        ):
+            updated = await update_long_term_memory(
+                "memory-1",
+                {"project_id": "project-new", "agent_id": "agent-new"},
+            )
+
+        assert updated is not None
+        assert updated.project_id == "project-new"
+        assert updated.agent_id == "agent-new"
+        stored_memory = mock_adapter.update_memories.await_args.args[0][0]
+        assert stored_memory.project_id == "project-new"
+        assert stored_memory.agent_id == "agent-new"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["project_id", "agent_id"])
+    async def test_update_long_term_memory_rejects_internal_shared_scope(self, field):
+        existing_memory = MemoryRecord(id="memory-1", text="Original memory")
+
+        with (
+            patch(
+                "agent_memory_server.long_term_memory.get_long_term_memory_by_id",
+                new=AsyncMock(return_value=existing_memory),
+            ),
+            pytest.raises(ValueError, match="reserved for internal storage"),
+        ):
+            await update_long_term_memory("memory-1", {field: "__shared__"})
+
+    @pytest.mark.asyncio
     async def test_deduplicate_by_id(self, mock_async_redis_client):
         """Test deduplication by id using memory vector database"""
         memory = MemoryRecord(
@@ -251,6 +297,83 @@ class TestLongTermMemory:
             assert result_memory == memory
             assert overwrite is True
             mock_adapter.delete_memories.assert_called_once_with(["test-id"])
+
+    @pytest.mark.asyncio
+    async def test_deduplicate_by_id_rejects_a_cross_scope_collision(
+        self, mock_async_redis_client
+    ):
+        incoming = MemoryRecord(
+            id="shared-id",
+            text="Project A memory",
+            project_id="project-a",
+            user_id="user-a",
+            agent_id="agent-a",
+            session_id="session-a",
+            namespace="coding/a",
+        )
+        existing = MemoryRecordResult(
+            id="shared-id",
+            text="Project B memory",
+            project_id="project-b",
+            user_id="user-a",
+            agent_id="agent-a",
+            session_id="session-a",
+            namespace="coding/a",
+            dist=0.0,
+        )
+        database = AsyncMock()
+        database.list_memories.return_value = MemoryRecordResults(
+            memories=[existing],
+            total=1,
+        )
+
+        with (
+            patch(
+                "agent_memory_server.long_term_memory.get_memory_vector_db",
+                new=AsyncMock(return_value=database),
+            ),
+            pytest.raises(ValueError, match="already exists in a different scope"),
+        ):
+            await deduplicate_by_id(incoming, redis_client=mock_async_redis_client)
+
+        database.delete_memories.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_deduplicate_by_id_rejects_scope_overrides_that_change_memory(
+        self, mock_async_redis_client
+    ):
+        """A helper argument must not disguise the memory's real owner."""
+        incoming = MemoryRecord(
+            id="shared-id",
+            text="Project B memory",
+            project_id="project-b",
+        )
+        existing = MemoryRecordResult(
+            id="shared-id",
+            text="Project A memory",
+            project_id="project-a",
+            dist=0.0,
+        )
+        database = AsyncMock()
+        database.list_memories.return_value = MemoryRecordResults(
+            memories=[existing],
+            total=1,
+        )
+
+        with (
+            patch(
+                "agent_memory_server.long_term_memory.get_memory_vector_db",
+                new=AsyncMock(return_value=database),
+            ),
+            pytest.raises(ValueError, match="does not match the memory record"),
+        ):
+            await deduplicate_by_id(
+                incoming,
+                redis_client=mock_async_redis_client,
+                project_id="project-a",
+            )
+
+        database.delete_memories.assert_not_awaited()
 
     def test_generate_memory_hash(self):
         """Test memory hash generation"""
@@ -456,6 +579,8 @@ class TestLongTermMemory:
         mock_adapter.count_memories.assert_called_once_with(
             namespace="test-namespace",
             user_id="test-user",
+            project_id=None,
+            agent_id=None,
             session_id="test-session",
         )
 
@@ -536,7 +661,9 @@ class TestLongTermMemory:
                 created_at=datetime.fromtimestamp(1000, UTC),
                 last_accessed=datetime.fromtimestamp(1500, UTC),
                 namespace="test",
+                project_id="project-123",
                 user_id="user123",
+                agent_id="agent-123",
                 session_id="session456",
                 memory_type=MemoryTypeEnum.SEMANTIC,
                 discrete_memory_extracted="t",
@@ -549,7 +676,9 @@ class TestLongTermMemory:
                 created_at=datetime.fromtimestamp(1200, UTC),
                 last_accessed=datetime.fromtimestamp(1600, UTC),
                 namespace="test",
+                project_id="project-123",
                 user_id="user123",
+                agent_id="agent-123",
                 session_id="session456",
                 memory_type=MemoryTypeEnum.SEMANTIC,
                 discrete_memory_extracted="t",
@@ -583,7 +712,9 @@ class TestLongTermMemory:
             )  # Latest timestamp
             assert set(merged.topics) == {"coffee", "preferences", "morning"}
             assert set(merged.entities) == {"user"}
+            assert merged.project_id == "project-123"
             assert merged.user_id == "user123"
+            assert merged.agent_id == "agent-123"
             assert merged.session_id == "session456"
             assert merged.namespace == "test"
             assert merged.memory_hash is not None
@@ -837,6 +968,8 @@ class TestLongTermMemory:
         test_working_memory = WorkingMemory(
             session_id="test-session",
             namespace="test",
+            project_id="project-a",
+            agent_id="agent-a",
             messages=[],
             memories=[persisted_memory, unpersisted_memory1, unpersisted_memory2],
         )
@@ -875,6 +1008,8 @@ class TestLongTermMemory:
                 session_id="test-session",
                 namespace="test",
                 user_id=None,
+                project_id=None,
+                agent_id=None,
                 redis_client=mock_async_redis_client,
             )
 
@@ -883,6 +1018,10 @@ class TestLongTermMemory:
 
             # Verify indexing was called for unpersisted memories
             assert mock_index.call_count == 2
+            for call in mock_index.await_args_list:
+                promoted_memory = call.args[0][0]
+                assert promoted_memory.project_id == "project-a"
+                assert promoted_memory.agent_id == "agent-a"
 
             # Verify working memory was updated with new timestamps
             mock_set.assert_called_once()

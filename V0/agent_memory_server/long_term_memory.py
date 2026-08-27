@@ -21,6 +21,7 @@ from agent_memory_server.extraction import (
     handle_extraction,
 )
 from agent_memory_server.filters import (
+    AgentId,
     CreatedAt,
     Entities,
     EventDate,
@@ -29,6 +30,7 @@ from agent_memory_server.filters import (
     MemoryHash,
     MemoryType,
     Namespace,
+    ProjectId,
     SessionId,
     Topics,
     UserId,
@@ -44,6 +46,7 @@ from agent_memory_server.models import (
     MemoryTypeEnum,
     SearchModeEnum,
 )
+from agent_memory_server.scopes import SHARED_SCOPE, encode_scope
 from agent_memory_server.utils.datetime import parse_iso8601_datetime
 from agent_memory_server.utils.keys import Keys
 from agent_memory_server.utils.recency import (
@@ -164,7 +167,30 @@ EXTRACTION_PENDING_KEY_PREFIX = "extraction_pending"
 EXTRACTION_DEBOUNCE_KEY_PREFIX = "extraction_debounce"
 
 
-async def should_extract_session_thread(session_id: str, redis: Redis) -> bool:
+def _working_scope_suffix(
+    session_id: str,
+    namespace: str | None = None,
+    project_id: str | None = None,
+    user_id: str | None = None,
+    agent_id: str | None = None,
+) -> str:
+    return Keys.working_memory_key(
+        session_id=session_id,
+        namespace=namespace,
+        project_id=project_id,
+        user_id=user_id,
+        agent_id=agent_id,
+    ).removeprefix("working_memory:")
+
+
+async def should_extract_session_thread(
+    session_id: str,
+    redis: Redis,
+    namespace: str | None = None,
+    project_id: str | None = None,
+    user_id: str | None = None,
+    agent_id: str | None = None,
+) -> bool:
     """
     Check if extraction should proceed based on debounce.
 
@@ -179,7 +205,10 @@ async def should_extract_session_thread(session_id: str, redis: Redis) -> bool:
     Returns:
         True if extraction should proceed, False if debounced
     """
-    debounce_key = f"{EXTRACTION_DEBOUNCE_KEY_PREFIX}:{session_id}"
+    debounce_key = (
+        f"{EXTRACTION_DEBOUNCE_KEY_PREFIX}:"
+        f"{_working_scope_suffix(session_id, namespace, project_id, user_id, agent_id)}"
+    )
 
     # Check if debounce key exists (set after successful extraction)
     exists = await redis.exists(debounce_key)
@@ -194,7 +223,14 @@ async def should_extract_session_thread(session_id: str, redis: Redis) -> bool:
     return False
 
 
-async def set_extraction_debounce(session_id: str, redis: Redis) -> None:
+async def set_extraction_debounce(
+    session_id: str,
+    redis: Redis,
+    namespace: str | None = None,
+    project_id: str | None = None,
+    user_id: str | None = None,
+    agent_id: str | None = None,
+) -> None:
     """
     Set the debounce key after successful extraction.
 
@@ -205,7 +241,10 @@ async def set_extraction_debounce(session_id: str, redis: Redis) -> None:
         session_id: The session ID to set debounce for
         redis: Redis client
     """
-    debounce_key = f"{EXTRACTION_DEBOUNCE_KEY_PREFIX}:{session_id}"
+    debounce_key = (
+        f"{EXTRACTION_DEBOUNCE_KEY_PREFIX}:"
+        f"{_working_scope_suffix(session_id, namespace, project_id, user_id, agent_id)}"
+    )
     debounce_ttl = settings.extraction_debounce_seconds
     await redis.setex(debounce_key, debounce_ttl, "extracted")
     logger.info(f"Set extraction debounce for session {session_id} ({debounce_ttl}s)")
@@ -216,6 +255,8 @@ async def schedule_trailing_extraction(
     namespace: str | None,
     user_id: str | None,
     redis: Redis,
+    project_id: str | None = None,
+    agent_id: str | None = None,
 ) -> None:
     """
     Schedule a trailing-edge debounced extraction.
@@ -234,7 +275,10 @@ async def schedule_trailing_extraction(
     """
     from datetime import timedelta
 
-    pending_key = f"{EXTRACTION_PENDING_KEY_PREFIX}:{session_id}"
+    scope_suffix = _working_scope_suffix(
+        session_id, namespace, project_id, user_id, agent_id
+    )
+    pending_key = f"{EXTRACTION_PENDING_KEY_PREFIX}:{scope_suffix}"
     debounce_seconds = settings.extraction_debounce_seconds
 
     # Calculate when extraction should run (trailing edge)
@@ -260,7 +304,7 @@ async def schedule_trailing_extraction(
                 # Schedule with a unique key per session
                 # If there's already a pending task for this session, the new one
                 # will check the timestamp and skip if superseded
-                task_key = f"extraction:{session_id}:{extraction_timestamp}"
+                task_key = f"extraction:{scope_suffix}:{extraction_timestamp}"
                 await docket.add(
                     run_delayed_extraction,
                     when=extraction_time,
@@ -269,6 +313,8 @@ async def schedule_trailing_extraction(
                     session_id=session_id,
                     namespace=namespace,
                     user_id=user_id,
+                    project_id=project_id,
+                    agent_id=agent_id,
                     scheduled_timestamp=extraction_timestamp,
                 )
                 logger.debug(f"Docket task scheduled with key {task_key}")
@@ -286,6 +332,8 @@ async def schedule_trailing_extraction(
                     session_id=session_id,
                     namespace=namespace,
                     user_id=user_id,
+                    project_id=project_id,
+                    agent_id=agent_id,
                     scheduled_timestamp=extraction_timestamp,
                 )
             finally:
@@ -305,6 +353,8 @@ async def run_delayed_extraction(
     session_id: str,
     namespace: str | None = None,
     user_id: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
     scheduled_timestamp: str | None = None,
 ) -> int:
     """
@@ -330,7 +380,10 @@ async def run_delayed_extraction(
     )
 
     redis = await get_redis_conn()
-    pending_key = f"{EXTRACTION_PENDING_KEY_PREFIX}:{session_id}"
+    pending_key = (
+        f"{EXTRACTION_PENDING_KEY_PREFIX}:"
+        f"{_working_scope_suffix(session_id, namespace, project_id, user_id, agent_id)}"
+    )
 
     # Check if this task is still valid (not superseded by a newer schedule)
     current_pending = await redis.get(pending_key)
@@ -349,12 +402,23 @@ async def run_delayed_extraction(
         return 0
 
     # Check if we're still within the post-extraction debounce
-    if not await should_extract_session_thread(session_id, redis):
+    if not await should_extract_session_thread(
+        session_id,
+        redis,
+        namespace=namespace,
+        project_id=project_id,
+        user_id=user_id,
+        agent_id=agent_id,
+    ):
         return 0
 
     # Get working memory to extract from
     working_memory = await get_working_memory(
-        session_id=session_id, namespace=namespace, user_id=user_id
+        session_id=session_id,
+        namespace=namespace,
+        project_id=project_id,
+        user_id=user_id,
+        agent_id=agent_id,
     )
 
     if not working_memory or not working_memory.messages:
@@ -382,6 +446,8 @@ async def run_delayed_extraction(
             session_id=session_id,
             namespace=namespace,
             user_id=user_id,
+            project_id=project_id,
+            agent_id=agent_id,
         )
 
         # Mark all messages as extracted
@@ -395,7 +461,14 @@ async def run_delayed_extraction(
         )
 
         # Set post-extraction debounce
-        await set_extraction_debounce(session_id, redis)
+        await set_extraction_debounce(
+            session_id,
+            redis,
+            namespace=namespace,
+            project_id=project_id,
+            user_id=user_id,
+            agent_id=agent_id,
+        )
 
         # Clear the pending key
         await redis.delete(pending_key)
@@ -465,7 +538,9 @@ def _build_thread_extraction_context(
     context: dict[str, Any] = {
         "session_id": working_memory.session_id,
         "namespace": working_memory.namespace,
+        "project_id": working_memory.project_id,
         "user_id": working_memory.user_id,
+        "agent_id": working_memory.agent_id,
         "message_count": len(working_memory.messages),
         "source_message_ids": source_message_ids,
         "messages": message_context,
@@ -481,8 +556,18 @@ def _thread_summary_memory_id(
     namespace: str | None,
     user_id: str | None,
     session_id: str,
+    project_id: str | None = None,
+    agent_id: str | None = None,
 ) -> str:
-    material = "|".join([namespace or "", user_id or "", session_id])
+    material = "|".join(
+        [
+            namespace or "",
+            project_id or "",
+            user_id or "",
+            agent_id or "",
+            session_id,
+        ]
+    )
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
     return f"thread_summary_{digest}"
 
@@ -584,7 +669,9 @@ def _memory_data_to_record(
         id=(
             _thread_summary_memory_id(
                 namespace=thread_context.get("namespace"),
+                project_id=thread_context.get("project_id"),
                 user_id=thread_context.get("user_id"),
+                agent_id=thread_context.get("agent_id"),
                 session_id=str(thread_context["session_id"]),
             )
             if is_summary
@@ -601,7 +688,9 @@ def _memory_data_to_record(
         event_date=event_date,
         session_id=thread_context.get("session_id"),
         namespace=thread_context.get("namespace"),
+        project_id=thread_context.get("project_id"),
         user_id=thread_context.get("user_id"),
+        agent_id=thread_context.get("agent_id"),
         created_at=created_at,
         extraction_strategy=strategy_type,
         extraction_strategy_config=strategy_config.config,
@@ -658,6 +747,8 @@ async def extract_memories_from_session_thread(
     session_id: str,
     namespace: str | None = None,
     user_id: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
 ) -> list[MemoryRecord]:
     """
     Extract memories from the entire conversation thread in working memory.
@@ -677,7 +768,11 @@ async def extract_memories_from_session_thread(
 
     # Get the complete working memory thread
     working_memory = await get_working_memory(
-        session_id=session_id, namespace=namespace, user_id=user_id
+        session_id=session_id,
+        namespace=namespace,
+        project_id=project_id,
+        user_id=user_id,
+        agent_id=agent_id,
     )
 
     if not working_memory or not working_memory.messages:
@@ -703,7 +798,9 @@ async def extract_memories_from_session_thread(
             )
             summary_id = _thread_summary_memory_id(
                 namespace=working_memory.namespace,
+                project_id=working_memory.project_id,
                 user_id=working_memory.user_id,
+                agent_id=working_memory.agent_id,
                 session_id=working_memory.session_id,
             )
             if await _existing_summary_matches_source(
@@ -872,9 +969,11 @@ async def merge_memories_with_llm(
     # Use the most recent last_accessed timestamp
     last_accessed = max(coerce_to_float(m, "last_accessed") for m in memories)
 
-    # Prefer non-empty namespace, user_id, session_id from memories
+    # Preserve the private scope of the cohesive merge group.
     namespace = next((m.namespace for m in memories if m.namespace), None)
+    project_id = next((m.project_id for m in memories if m.project_id), None)
     user_id = next((m.user_id for m in memories if m.user_id), None)
+    agent_id = next((m.agent_id for m in memories if m.agent_id), None)
     session_id = next((m.session_id for m in memories if m.session_id), None)
 
     # Get the memory type from the first memory
@@ -884,7 +983,9 @@ async def merge_memories_with_llm(
     merged_memory = MemoryRecord(
         text=merged_text.strip(),
         id=str(ULID()),
+        project_id=project_id,
         user_id=user_id,
+        agent_id=agent_id,
         session_id=session_id,
         namespace=namespace,
         created_at=datetime.fromtimestamp(created_at, UTC),
@@ -1149,7 +1250,9 @@ async def compact_long_term_memories(
                     memory_obj = MemoryRecord(
                         id=memory_result.id,
                         text=memory_result.text,
+                        project_id=memory_result.project_id,
                         user_id=memory_result.user_id,
+                        agent_id=memory_result.agent_id,
                         session_id=memory_result.session_id,
                         namespace=memory_result.namespace,
                         created_at=memory_result.created_at,
@@ -1172,6 +1275,8 @@ async def compact_long_term_memories(
                         redis_client=redis_client,
                         namespace=namespace,
                         user_id=user_id,
+                        project_id=memory_obj.project_id,
+                        agent_id=memory_obj.agent_id,
                         session_id=session_id,
                         vector_distance_threshold=vector_distance_threshold,
                     )
@@ -1357,6 +1462,8 @@ async def search_long_term_memories(
     text_scorer: str = "BM25STD",
     session_id: SessionId | None = None,
     user_id: UserId | None = None,
+    project_id: ProjectId | None = None,
+    agent_id: AgentId | None = None,
     namespace: Namespace | None = None,
     created_at: CreatedAt | None = None,
     last_accessed: LastAccessed | None = None,
@@ -1417,6 +1524,8 @@ async def search_long_term_memories(
         return await db.list_memories(
             session_id=session_id,
             user_id=user_id,
+            project_id=project_id,
+            agent_id=agent_id,
             namespace=namespace,
             created_at=created_at,
             last_accessed=last_accessed,
@@ -1459,6 +1568,8 @@ async def search_long_term_memories(
         text_scorer=text_scorer,
         session_id=session_id,
         user_id=user_id,
+        project_id=project_id,
+        agent_id=agent_id,
         namespace=namespace,
         created_at=created_at,
         last_accessed=last_accessed,
@@ -1491,6 +1602,8 @@ async def search_long_term_memories(
                 text_scorer=text_scorer,
                 session_id=session_id,
                 user_id=user_id,
+                project_id=project_id,
+                agent_id=agent_id,
                 namespace=namespace,
                 created_at=created_at,
                 last_accessed=last_accessed,
@@ -1525,6 +1638,8 @@ async def search_long_term_memories(
 async def count_long_term_memories(
     namespace: str | None = None,
     user_id: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
     session_id: str | None = None,
     redis_client: Redis | None = None,
 ) -> int:
@@ -1549,6 +1664,8 @@ async def count_long_term_memories(
     return await db.count_memories(
         namespace=namespace,
         user_id=user_id,
+        project_id=project_id,
+        agent_id=agent_id,
         session_id=session_id,
     )
 
@@ -1558,6 +1675,8 @@ async def deduplicate_by_hash(
     redis_client: Redis | None = None,
     namespace: str | None = None,
     user_id: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
     session_id: str | None = None,
 ) -> tuple[MemoryRecord | None, bool]:
     """
@@ -1588,13 +1707,10 @@ async def deduplicate_by_hash(
     if namespace or memory.namespace:
         namespace_filter = Namespace(eq=namespace or memory.namespace)
 
-    user_id_filter = None
-    if user_id or memory.user_id:
-        user_id_filter = UserId(eq=user_id or memory.user_id)
-
-    session_id_filter = None
-    if session_id or memory.session_id:
-        session_id_filter = SessionId(eq=session_id or memory.session_id)
+    project_id_filter = ProjectId(eq=encode_scope(project_id or memory.project_id))
+    user_id_filter = UserId(eq=encode_scope(user_id or memory.user_id))
+    agent_id_filter = AgentId(eq=encode_scope(agent_id or memory.agent_id))
+    session_id_filter = SessionId(eq=encode_scope(session_id or memory.session_id))
 
     # Create memory hash filter
     memory_hash_filter = MemoryHash(eq=memory_hash)
@@ -1607,6 +1723,8 @@ async def deduplicate_by_hash(
     results = await db.list_memories(
         session_id=session_id_filter,
         user_id=user_id_filter,
+        project_id=project_id_filter,
+        agent_id=agent_id_filter,
         namespace=namespace_filter,
         memory_hash=memory_hash_filter,
         limit=1,  # We only need to know if one exists
@@ -1637,6 +1755,8 @@ async def deduplicate_by_id(
     redis_client: Redis | None = None,
     namespace: str | None = None,
     user_id: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
     session_id: str | None = None,
 ) -> tuple[MemoryRecord | None, bool]:
     """
@@ -1662,27 +1782,20 @@ async def deduplicate_by_id(
     if not memory.id:
         return memory, False
 
-    # Use memory vector database to search for memories with the same id
-    # Build filter objects
-    namespace_filter = None
-    if namespace or memory.namespace:
-        from agent_memory_server.filters import Namespace
+    supplied_scopes = {
+        "namespace": namespace,
+        "project_id": project_id,
+        "user_id": user_id,
+        "agent_id": agent_id,
+        "session_id": session_id,
+    }
+    for field, supplied_value in supplied_scopes.items():
+        if supplied_value is not None and supplied_value != getattr(memory, field):
+            raise ValueError(f"{field} override does not match the memory record")
 
-        namespace_filter = Namespace(eq=namespace or memory.namespace)
-
-    user_id_filter = None
-    if user_id or memory.user_id:
-        from agent_memory_server.filters import UserId
-
-        user_id_filter = UserId(eq=user_id or memory.user_id)
-
-    session_id_filter = None
-    if session_id or memory.session_id:
-        from agent_memory_server.filters import SessionId
-
-        session_id_filter = SessionId(eq=session_id or memory.session_id)
-
-    # Create id filter
+    # IDs map to one global Redis key, so the collision check must also be
+    # global. A scoped lookup could miss another owner's record and overwrite
+    # it when the new record is loaded.
     from agent_memory_server.filters import Id
 
     id_filter = Id(eq=memory.id)
@@ -1693,9 +1806,6 @@ async def deduplicate_by_id(
     # Search for existing memories with the same id using filter-only query
     # (no embedding required)
     results = await db.list_memories(
-        session_id=session_id_filter,
-        user_id=user_id_filter,
-        namespace=namespace_filter,
         id=id_filter,
         limit=1,  # We only need to know if one exists
     )
@@ -1703,6 +1813,26 @@ async def deduplicate_by_id(
     if results.memories and len(results.memories) > 0:
         # Found existing memory with the same id
         existing_memory = results.memories[0]
+
+        incoming_scope = (
+            memory.namespace,
+            memory.project_id,
+            memory.user_id,
+            memory.agent_id,
+            memory.session_id,
+        )
+        existing_scope = (
+            existing_memory.namespace,
+            existing_memory.project_id,
+            existing_memory.user_id,
+            existing_memory.agent_id,
+            existing_memory.session_id,
+        )
+        if incoming_scope != existing_scope:
+            raise ValueError(
+                f"Memory id {memory.id} already exists in a different scope"
+            )
+
         logger.info(f"Found existing memory with id {memory.id}, will overwrite")
 
         # If the existing memory was already persisted, preserve that timestamp
@@ -1727,6 +1857,8 @@ async def _semantic_merge_group_is_cohesive(
     candidate_memories: list[MemoryRecordResult],
     namespace_filter: Namespace | None,
     user_id_filter: UserId | None,
+    project_id_filter: ProjectId,
+    agent_id_filter: AgentId,
     session_id_filter: SessionId | None,
     vector_distance_threshold: float,
 ) -> bool:
@@ -1749,6 +1881,8 @@ async def _semantic_merge_group_is_cohesive(
             query=candidate_memory.text,
             namespace=namespace_filter,
             user_id=user_id_filter,
+            project_id=project_id_filter,
+            agent_id=agent_id_filter,
             session_id=session_id_filter,
             distance_threshold=vector_distance_threshold,
             # During compaction the anchor memory is already indexed and can
@@ -1788,6 +1922,8 @@ async def deduplicate_by_semantic_search(
     redis_client: Redis | None = None,
     namespace: str | None = None,
     user_id: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
     session_id: str | None = None,
     vector_distance_threshold: float | None = None,
 ) -> tuple[MemoryRecord | None, bool]:
@@ -1835,32 +1971,24 @@ async def deduplicate_by_semantic_search(
 
     # Convert filters to database format
     namespace_filter = None
-    user_id_filter = None
-    session_id_filter = None
+    user_id_filter = UserId(eq=encode_scope(user_id or memory.user_id))
+    project_id_filter = ProjectId(eq=encode_scope(project_id or memory.project_id))
+    agent_id_filter = AgentId(eq=encode_scope(agent_id or memory.agent_id))
+    session_id_filter = SessionId(eq=encode_scope(session_id or memory.session_id))
 
     # TODO: Refactor to avoid inline imports (fix circular imports)
     if namespace or memory.namespace:
         from agent_memory_server.filters import Namespace
 
         namespace_filter = Namespace(eq=namespace or memory.namespace)
-    if user_id or memory.user_id:
-        from agent_memory_server.filters import UserId
-
-        user_id_filter = UserId(eq=user_id or memory.user_id)
-    # Only filter by session_id if explicitly provided — do NOT fall back to
-    # memory.session_id.  Semantic dedup must search across sessions so that
-    # compaction can merge identical memories created in different sessions.
-    if session_id:
-        from agent_memory_server.filters import SessionId
-
-        session_id_filter = SessionId(eq=session_id)
-
     # Use the memory vector database for semantic search
     # TODO: Paginate through results?
     search_result = await db.search_memories(
         query=memory.text,  # Use memory text for semantic search
         namespace=namespace_filter,
         user_id=user_id_filter,
+        project_id=project_id_filter,
+        agent_id=agent_id_filter,
         session_id=session_id_filter,
         distance_threshold=vector_distance_threshold,
         # Keep one extra slot so an already-indexed anchor memory does not
@@ -1883,6 +2011,8 @@ async def deduplicate_by_semantic_search(
             candidate_memories=vector_search_result,
             namespace_filter=namespace_filter,
             user_id_filter=user_id_filter,
+            project_id_filter=project_id_filter,
+            agent_id_filter=agent_id_filter,
             session_id_filter=session_id_filter,
             vector_distance_threshold=vector_distance_threshold,
         ):
@@ -1913,6 +2043,8 @@ async def promote_working_memory_to_long_term(
     session_id: str,
     namespace: str | None = None,
     user_id: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
     redis_client: Redis | None = None,
 ) -> int:
     """
@@ -1945,6 +2077,8 @@ async def promote_working_memory_to_long_term(
         session_id=session_id,
         namespace=namespace,
         user_id=user_id,
+        project_id=project_id,
+        agent_id=agent_id,
         redis_client=redis,
     )
 
@@ -1968,13 +2102,22 @@ async def promote_working_memory_to_long_term(
 
     if settings.enable_discrete_memory_extraction and unextracted_messages:
         # Check if we're not in post-extraction debounce
-        if await should_extract_session_thread(session_id, redis):
+        if await should_extract_session_thread(
+            session_id,
+            redis,
+            namespace=namespace,
+            project_id=project_id,
+            user_id=user_id,
+            agent_id=agent_id,
+        ):
             if settings.use_docket:
                 # When using Docket, schedule via the queue for worker processing
                 await schedule_trailing_extraction(
                     session_id=session_id,
                     namespace=namespace,
                     user_id=user_id,
+                    project_id=project_id,
+                    agent_id=agent_id,
                     redis=redis,
                 )
             else:
@@ -1993,6 +2136,8 @@ async def promote_working_memory_to_long_term(
                     session_id=session_id,
                     namespace=namespace,
                     user_id=user_id,
+                    project_id=project_id,
+                    agent_id=agent_id,
                 )
                 logger.info(
                     f"Inline extraction completed for session {session_id}: "
@@ -2009,6 +2154,11 @@ async def promote_working_memory_to_long_term(
     for memory in all_memories_to_process:
         if memory.persisted_at is None:
             # This memory needs to be promoted
+            memory.project_id = memory.project_id or current_working_memory.project_id
+            memory.user_id = memory.user_id or current_working_memory.user_id
+            memory.agent_id = memory.agent_id or current_working_memory.agent_id
+            memory.session_id = memory.session_id or current_working_memory.session_id
+            memory.namespace = memory.namespace or current_working_memory.namespace
 
             # Check for id-based duplicates and handle accordingly
             deduped_memory, was_overwrite = await deduplicate_by_id(
@@ -2070,7 +2220,9 @@ async def promote_working_memory_to_long_term(
                     session_id=session_id,
                     text=f"{msg.role}: {msg.content}",
                     namespace=namespace,
+                    project_id=current_working_memory.project_id,
                     user_id=current_working_memory.user_id,
+                    agent_id=current_working_memory.agent_id,
                     persisted_at=None,
                     created_at=msg.created_at,
                     memory_type=MemoryTypeEnum.MESSAGE,
@@ -2269,6 +2421,8 @@ async def update_long_term_memory(
         "memory_type",
         "namespace",
         "user_id",
+        "project_id",
+        "agent_id",
         "session_id",
         "event_date",
         "pinned",
@@ -2280,6 +2434,10 @@ async def update_long_term_memory(
         raise ValueError(
             f"Cannot update fields: {invalid_fields}. Valid fields: {updatable_fields}"
         )
+
+    for field in ("project_id", "user_id", "agent_id", "session_id"):
+        if updates.get(field) == SHARED_SCOPE:
+            raise ValueError(f"{SHARED_SCOPE} is reserved for internal storage")
 
     # Create updated memory record using efficient model_copy and hash helper
     base_updates = {**updates, "updated_at": datetime.now(UTC)}

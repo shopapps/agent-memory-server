@@ -1,0 +1,103 @@
+name: "${AMS_COMPOSE_PROJECT:?AMS_COMPOSE_PROJECT is required}"
+
+x-agent-memory-env: &agent-memory-env
+  REDIS_URL: redis://redis:6379
+  DISABLE_AUTH: "true"
+
+services:
+  redis:
+    image: "${AMS_REDIS_IMAGE:?AMS_REDIS_IMAGE is required}"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    image: "${AMS_IMAGE:?AMS_IMAGE is required}"
+    command:
+      - agent-memory
+      - api
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --task-backend
+      - docket
+    env_file:
+      - path: "${AMS_ENV_FILE:?AMS_ENV_FILE is required}"
+        required: false
+    environment: *agent-memory-env
+    ports:
+      - "127.0.0.1:${AMS_API_PORT:-8000}:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  mcp:
+    image: "${AMS_IMAGE:?AMS_IMAGE is required}"
+    command:
+      - agent-memory
+      - mcp
+      - --mode
+      - streamable-http
+      - --port
+      - "9000"
+      - --task-backend
+      - docket
+    env_file:
+      - path: "${AMS_ENV_FILE:?AMS_ENV_FILE is required}"
+        required: false
+    environment: *agent-memory-env
+    ports:
+      - "127.0.0.1:${AMS_MCP_PORT:-9050}:9000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS
+          -H 'Content-Type: application/json'
+          -H 'Accept: application/json, text/event-stream'
+          --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"compose-health","version":"1"}}}'
+          http://127.0.0.1:9000/mcp >/dev/null
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 30s
+    restart: unless-stopped
+
+  worker:
+    image: "${AMS_IMAGE:?AMS_IMAGE is required}"
+    command:
+      - agent-memory
+      - task-worker
+      - --concurrency
+      - "${AMS_WORKER_CONCURRENCY:-5}"
+    env_file:
+      - path: "${AMS_ENV_FILE:?AMS_ENV_FILE is required}"
+        required: false
+    environment: *agent-memory-env
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+    name: umony-agent-memory-redis-data

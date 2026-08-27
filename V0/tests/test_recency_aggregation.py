@@ -47,6 +47,11 @@ async def test_redis_adapter_uses_aggregation_when_server_side_recency():
     # Mock the AsyncSearchIndex
     mock_index = MagicMock()
     mock_index.exists = AsyncMock(return_value=True)
+    mock_index.info = AsyncMock(
+        return_value={
+            "attributes": [{"attribute": "project_id"}, {"attribute": "agent_id"}]
+        }
+    )
 
     class Rows:
         def __init__(self, rows):

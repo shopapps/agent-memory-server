@@ -16,6 +16,7 @@ from agent_memory_server.models import (
     MemoryStrategyConfig,
     WorkingMemory,
 )
+from agent_memory_server.scopes import decode_scope, encode_scope
 from agent_memory_server.utils.keys import Keys
 from agent_memory_server.utils.redis import get_redis_conn
 
@@ -25,6 +26,45 @@ logger = logging.getLogger(__name__)
 # Redis keys for migration status (shared across workers, persists across restarts)
 MIGRATION_STATUS_KEY = "working_memory:migration:complete"
 MIGRATION_REMAINING_KEY = "working_memory:migration:remaining"
+MAX_WORKING_MEMORY_RESOLUTION_CANDIDATES = 100
+
+
+def _working_memory_data_matches_scopes(
+    data: dict,
+    user_id: str | None,
+    project_id: str | None,
+    agent_id: str | None,
+    namespace: str | None,
+    session_id: str,
+) -> bool:
+    """Match the full stored identity; omitted owner scopes mean shared."""
+    stored_user_id = encode_scope(decode_scope(data.get("user_id")))
+    stored_project_id = encode_scope(decode_scope(data.get("project_id")))
+    stored_agent_id = encode_scope(decode_scope(data.get("agent_id")))
+    return (
+        (namespace is None or data.get("namespace") == namespace)
+        and data.get("session_id") == session_id
+        and stored_user_id == encode_scope(user_id)
+        and stored_project_id == encode_scope(project_id)
+        and stored_agent_id == encode_scope(agent_id)
+    )
+
+
+async def _read_working_memory_data(redis_client: Redis, key: str) -> dict | None:
+    """Read current JSON or legacy string data without changing its key."""
+    key_type = await redis_client.type(key)
+    if isinstance(key_type, bytes):
+        key_type = key_type.decode("utf-8")
+
+    if key_type == "ReJSON-RL":
+        return await redis_client.json().get(key)
+    if key_type == "string":
+        raw_data = await redis_client.get(key)
+        if isinstance(raw_data, bytes):
+            raw_data = raw_data.decode("utf-8")
+        if raw_data:
+            return json.loads(raw_data)
+    return None
 
 
 async def check_and_set_migration_status(redis_client: Redis | None = None) -> bool:
@@ -269,6 +309,8 @@ async def list_sessions(
     offset: int = 0,
     namespace: str | None = None,
     user_id: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
 ) -> tuple[int, list[str]]:
     """
     List sessions using Redis Search index.
@@ -293,62 +335,62 @@ async def list_sessions(
         # Get the search index
         index = await get_working_memory_index(redis)
 
-        # Build filter expression using Tag filters
-        filters = []
-        if namespace:
-            filters.append(Tag("namespace") == namespace)
-        if user_id:
-            filters.append(Tag("user_id") == user_id)
+        # Old shared JSON records used null or missing owner fields. Querying
+        # only for the new shared sentinel would hide those records. Page over
+        # namespace candidates, then check each stored record so old and new
+        # shared values are handled the same without exposing private sessions.
+        filter_expression = Tag("namespace") == namespace if namespace else None
+        page_size = MAX_WORKING_MEMORY_RESOLUTION_CANDIDATES
+        candidate_offset = 0
+        candidate_total: int | None = None
+        matched_total = 0
+        session_ids: list[str] = []
 
-        # Combine filters with AND logic, or use None for no filter
-        filter_expression = None
-        if filters:
-            if len(filters) == 1:
-                filter_expression = filters[0]
-            else:
-                # Combine multiple filters with AND
-                from functools import reduce
-
-                filter_expression = reduce(lambda x, y: x & y, filters)
-
-        # Create FilterQuery
-        filter_query = FilterQuery(
-            filter_expression=filter_expression,
-            return_fields=["session_id"],
-            num_results=limit + offset,
-        )
-
-        # Execute the query
-        raw_results = await index.search(filter_query)
-
-        # Parse results
-        docs = getattr(raw_results, "docs", raw_results) or []
-        total = getattr(raw_results, "total", len(docs))
-
-        # Extract session_ids from results, applying offset
-        session_ids = []
-        for doc in docs[offset:]:
-            # Handle different doc formats (dict-like or object)
-            if hasattr(doc, "__dict__"):
-                session_id = getattr(doc, "session_id", None)
-            elif isinstance(doc, dict):
-                session_id = doc.get("session_id")
-            else:
-                session_id = dict(doc).get("session_id")
-
-            if session_id:
-                # Handle bytes if needed
-                if isinstance(session_id, bytes):
-                    session_id = session_id.decode("utf-8")
-                # Remove JSON quotes if present
-                if session_id.startswith('"') and session_id.endswith('"'):
-                    session_id = session_id[1:-1]
-                session_ids.append(session_id)
-
-            if len(session_ids) >= limit:
+        while candidate_total is None or candidate_offset < candidate_total:
+            filter_query = FilterQuery(
+                filter_expression=filter_expression,
+                return_fields=["session_id"],
+                num_results=page_size,
+            ).paging(candidate_offset, page_size)
+            raw_results = await index.search(filter_query)
+            docs = getattr(raw_results, "docs", raw_results) or []
+            if candidate_total is None:
+                candidate_total = int(getattr(raw_results, "total", len(docs)))
+            if not docs:
                 break
 
-        return total, session_ids
+            for doc in docs:
+                doc_key = getattr(doc, "id", None)
+                if doc_key is None and isinstance(doc, dict):
+                    doc_key = doc.get("id")
+                if not doc_key:
+                    continue
+                if isinstance(doc_key, bytes):
+                    doc_key = doc_key.decode("utf-8")
+
+                data = await redis.json().get(doc_key)
+                if not data:
+                    continue
+                stored_session_id = data.get("session_id")
+                if not isinstance(stored_session_id, str):
+                    continue
+                if not _working_memory_data_matches_scopes(
+                    data,
+                    user_id,
+                    project_id,
+                    agent_id,
+                    namespace,
+                    stored_session_id,
+                ):
+                    continue
+
+                if matched_total >= offset and len(session_ids) < limit:
+                    session_ids.append(stored_session_id)
+                matched_total += 1
+
+            candidate_offset += len(docs)
+
+        return matched_total, session_ids
 
     except Exception as e:
         logger.error(f"Error listing sessions: {e}")
@@ -361,6 +403,8 @@ async def _resolve_working_memory_key_via_index(
     session_id: str,
     user_id: str | None = None,
     namespace: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
 ) -> str | None:
     """
     Resolve the actual Redis key for a working memory session using the search index.
@@ -395,12 +439,13 @@ async def _resolve_working_memory_key_via_index(
             filter_expression &= Tag("namespace") == namespace
         if user_id:
             filter_expression &= Tag("user_id") == user_id
-
-        # Request up to 2 results so we can detect ambiguity.
+        # Project and agent are checked against the stored JSON below. Keeping
+        # them out of the Redis filter lets legacy documents with missing scope
+        # fields remain readable when they are shared at those dimensions.
         filter_query = FilterQuery(
             filter_expression=filter_expression,
-            return_fields=["session_id", "namespace", "user_id"],
-            num_results=2,
+            return_fields=["session_id"],
+            num_results=MAX_WORKING_MEMORY_RESOLUTION_CANDIDATES,
         )
 
         raw_results = await index.search(filter_query)
@@ -410,22 +455,48 @@ async def _resolve_working_memory_key_via_index(
             return None
 
         total = getattr(raw_results, "total", len(docs))
-        if total > 1:
+        if total > len(docs):
             logger.warning(
                 "Ambiguous working-memory lookup for session_id=%s: "
-                "%d sessions matched. Provide namespace/user_id to disambiguate.",
+                "%d sessions exceeded the safe resolution limit. "
+                "Provide namespace and scope IDs to disambiguate.",
                 session_id,
                 total,
             )
             return None
 
-        doc = docs[0]
-        # RedisVL returns doc.id as the full Redis key
-        doc_key = getattr(doc, "id", None)
-        if doc_key:
+        matching_keys = []
+        for doc in docs:
+            # RedisVL returns doc.id as the full Redis key.
+            doc_key = getattr(doc, "id", None)
+            if doc_key is None and isinstance(doc, dict):
+                doc_key = doc.get("id")
+            if not doc_key:
+                continue
             if isinstance(doc_key, bytes):
                 doc_key = doc_key.decode("utf-8")
-            return doc_key
+
+            data = await redis_client.json().get(doc_key)
+            if data and _working_memory_data_matches_scopes(
+                data,
+                user_id,
+                project_id,
+                agent_id,
+                namespace,
+                session_id,
+            ):
+                matching_keys.append(doc_key)
+                if len(matching_keys) > 1:
+                    break
+
+        if len(matching_keys) == 1:
+            return matching_keys[0]
+        if len(matching_keys) > 1:
+            logger.warning(
+                "Ambiguous working-memory lookup for session_id=%s: "
+                "multiple sessions matched the requested shared/private scopes.",
+                session_id,
+            )
 
         return None
 
@@ -438,6 +509,8 @@ async def get_working_memory(
     session_id: str,
     user_id: str | None = None,
     namespace: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
     redis_client: Redis | None = None,
     recent_messages_limit: int | None = None,
 ) -> WorkingMemory | None:
@@ -465,6 +538,8 @@ async def get_working_memory(
         session_id=session_id,
         user_id=user_id,
         namespace=namespace,
+        project_id=project_id,
+        agent_id=agent_id,
     )
 
     try:
@@ -473,27 +548,49 @@ async def get_working_memory(
         # Check migration status (uses Redis, shared across workers)
         migration_complete = await is_migration_complete(redis_client)
 
-        if migration_complete:
-            # Fast path: all keys are already in JSON format
-            working_memory_data = await redis_client.json().get(key)
-        else:
-            # Slow path: check key type to determine storage format
-            key_type = await redis_client.type(key)
-            if isinstance(key_type, bytes):
-                key_type = key_type.decode("utf-8")
+        candidate_keys = [key]
+        if project_id is None and agent_id is None:
+            legacy_key = Keys.legacy_working_memory_key(
+                session_id=session_id,
+                user_id=user_id,
+                namespace=namespace,
+            )
+            if legacy_key != key:
+                candidate_keys.append(legacy_key)
 
-            if key_type == "ReJSON-RL":
-                # New JSON format
-                working_memory_data = await redis_client.json().get(key)
-            elif key_type == "string":
-                # Old string format - migrate to JSON
-                string_data = await redis_client.get(key)
-                if string_data:
-                    if isinstance(string_data, bytes):
-                        string_data = string_data.decode("utf-8")
-                    working_memory_data = await _migrate_string_to_json(
-                        redis_client, key, string_data
-                    )
+        for candidate_key in candidate_keys:
+            if migration_complete:
+                # Fast path: all keys are already in JSON format
+                candidate_data = await redis_client.json().get(candidate_key)
+            else:
+                # Slow path: check key type to determine storage format
+                candidate_data = None
+                key_type = await redis_client.type(candidate_key)
+                if isinstance(key_type, bytes):
+                    key_type = key_type.decode("utf-8")
+
+                if key_type == "ReJSON-RL":
+                    candidate_data = await redis_client.json().get(candidate_key)
+                elif key_type == "string":
+                    string_data = await redis_client.get(candidate_key)
+                    if string_data:
+                        if isinstance(string_data, bytes):
+                            string_data = string_data.decode("utf-8")
+                        candidate_data = await _migrate_string_to_json(
+                            redis_client, candidate_key, string_data
+                        )
+
+            if candidate_data and _working_memory_data_matches_scopes(
+                candidate_data,
+                user_id,
+                project_id,
+                agent_id,
+                namespace,
+                session_id,
+            ):
+                key = candidate_key
+                working_memory_data = candidate_data
+                break
             # If key_type is "none", the key doesn't exist - working_memory_data stays None
 
         # Fallback: if direct key lookup failed, try resolving via the search
@@ -501,7 +598,12 @@ async def get_working_memory(
         # but GET was called without them (issue #235).
         if not working_memory_data:
             resolved_key = await _resolve_working_memory_key_via_index(
-                redis_client, session_id, user_id, namespace
+                redis_client,
+                session_id,
+                user_id,
+                namespace,
+                project_id,
+                agent_id,
             )
             if resolved_key and resolved_key != key:
                 logger.debug(
@@ -522,6 +624,8 @@ async def get_working_memory(
                     session_id=session_id,
                     user_id=user_id,
                     namespace=namespace,
+                    project_id=project_id,
+                    agent_id=agent_id,
                     recent_messages_limit=recent_messages_limit,
                 )
                 if reconstructed:
@@ -563,13 +667,19 @@ async def get_working_memory(
         # Use stored values for namespace/user_id — the caller may not have
         # provided them (index-fallback path, issue #235).
         stored_namespace = working_memory_data.get("namespace") or namespace
-        stored_user_id = working_memory_data.get("user_id") or user_id
+        stored_user_id = decode_scope(working_memory_data.get("user_id")) or user_id
+        stored_project_id = (
+            decode_scope(working_memory_data.get("project_id")) or project_id
+        )
+        stored_agent_id = decode_scope(working_memory_data.get("agent_id")) or agent_id
 
         return WorkingMemory(
             messages=messages,
             memories=memories,
             context=working_memory_data.get("context"),
             user_id=stored_user_id,
+            project_id=stored_project_id,
+            agent_id=stored_agent_id,
             tokens=working_memory_data.get("tokens", 0),
             session_id=session_id,
             namespace=stored_namespace,
@@ -615,6 +725,13 @@ async def set_working_memory(
         session_id=working_memory.session_id,
         user_id=working_memory.user_id,
         namespace=working_memory.namespace,
+        project_id=working_memory.project_id,
+        agent_id=working_memory.agent_id,
+    )
+    legacy_key = Keys.legacy_working_memory_key(
+        session_id=working_memory.session_id,
+        user_id=working_memory.user_id,
+        namespace=working_memory.namespace,
     )
 
     # Update the updated_at timestamp
@@ -629,7 +746,9 @@ async def set_working_memory(
             memory.model_dump(mode="json") for memory in working_memory.memories
         ],
         "context": working_memory.context,
-        "user_id": working_memory.user_id,
+        "user_id": encode_scope(working_memory.user_id),
+        "project_id": encode_scope(working_memory.project_id),
+        "agent_id": encode_scope(working_memory.agent_id),
         "tokens": working_memory.tokens,
         "session_id": working_memory.session_id,
         "namespace": working_memory.namespace,
@@ -657,6 +776,22 @@ async def set_working_memory(
             logger.info(
                 f"Set working memory for session {working_memory.session_id} with no TTL"
             )
+
+        # A compatibility read can load the old key shape, after which this write
+        # stores the same session under the V1 scope-safe key. Remove the stale
+        # source only after the replacement (and its TTL) has been stored so a
+        # later delete cannot expose the old copy through compatibility fallback.
+        if legacy_key != key:
+            legacy_data = await _read_working_memory_data(redis_client, legacy_key)
+            if legacy_data and _working_memory_data_matches_scopes(
+                legacy_data,
+                working_memory.user_id,
+                working_memory.project_id,
+                working_memory.agent_id,
+                working_memory.namespace,
+                working_memory.session_id,
+            ):
+                await redis_client.delete(legacy_key)
     except Exception as e:
         logger.error(
             f"Error setting working memory for session {working_memory.session_id}: {e}"
@@ -668,6 +803,8 @@ async def delete_working_memory(
     session_id: str,
     user_id: str | None = None,
     namespace: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
     redis_client: Redis | None = None,
 ) -> None:
     """
@@ -683,16 +820,42 @@ async def delete_working_memory(
         redis_client = await get_redis_conn()
 
     key = Keys.working_memory_key(
-        session_id=session_id, user_id=user_id, namespace=namespace
+        session_id=session_id,
+        user_id=user_id,
+        namespace=namespace,
+        project_id=project_id,
+        agent_id=agent_id,
     )
 
     try:
         # Check if the key exists; if not, try resolving via the search index
         # (same fallback as get_working_memory for issue #235).
         exists = await redis_client.exists(key)
+        if not exists and project_id is None and agent_id is None:
+            legacy_key = Keys.legacy_working_memory_key(
+                session_id=session_id,
+                user_id=user_id,
+                namespace=namespace,
+            )
+            legacy_data = await _read_working_memory_data(redis_client, legacy_key)
+            if legacy_data and _working_memory_data_matches_scopes(
+                legacy_data,
+                user_id,
+                project_id,
+                agent_id,
+                namespace,
+                session_id,
+            ):
+                key = legacy_key
+                exists = True
         if not exists:
             resolved_key = await _resolve_working_memory_key_via_index(
-                redis_client, session_id, user_id, namespace
+                redis_client,
+                session_id,
+                user_id,
+                namespace,
+                project_id,
+                agent_id,
             )
             if resolved_key:
                 key = resolved_key
@@ -712,6 +875,8 @@ async def _reconstruct_working_memory_from_long_term(
     session_id: str,
     user_id: str | None = None,
     namespace: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
     recent_messages_limit: int | None = None,
 ) -> WorkingMemory | None:
     """
@@ -729,13 +894,22 @@ async def _reconstruct_working_memory_from_long_term(
     Returns:
         Reconstructed WorkingMemory object or None if no messages found
     """
-    from agent_memory_server.filters import MemoryType, Namespace, SessionId, UserId
+    from agent_memory_server.filters import (
+        AgentId,
+        MemoryType,
+        Namespace,
+        ProjectId,
+        SessionId,
+        UserId,
+    )
     from agent_memory_server.long_term_memory import search_long_term_memories
 
     try:
         # Search for message-type memories for this session
         session_filter = SessionId(eq=session_id)
-        user_filter = UserId(eq=user_id) if user_id else None
+        user_filter = UserId(eq=encode_scope(user_id))
+        project_filter = ProjectId(eq=encode_scope(project_id))
+        agent_filter = AgentId(eq=encode_scope(agent_id))
         namespace_filter = Namespace(eq=namespace) if namespace else None
         memory_type_filter = MemoryType(eq="message")
 
@@ -746,6 +920,8 @@ async def _reconstruct_working_memory_from_long_term(
             text="",  # Empty query since we're filtering by metadata
             session_id=session_filter,
             user_id=user_filter,
+            project_id=project_filter,
+            agent_id=agent_filter,
             namespace=namespace_filter,
             memory_type=memory_type_filter,
             limit=search_limit,
@@ -798,6 +974,8 @@ async def _reconstruct_working_memory_from_long_term(
             session_id=session_id,
             namespace=namespace,
             user_id=user_id,
+            project_id=project_id,
+            agent_id=agent_id,
             messages=messages,
             memories=[],  # No structured memories in reconstruction
             context="",  # No context in reconstruction

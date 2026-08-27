@@ -1,0 +1,40 @@
+{
+  "name": "@umony/agent-memory",
+  "version": "0.1.0",
+  "description": "One-command macOS installer for the local Agent Memory runtime, Skill, and MCP clients.",
+  "type": "module",
+  "bin": {
+    "agent-memory": "./bin/agent-memory.js"
+  },
+  "files": [
+    "assets",
+    "bin",
+    "LICENSE",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "check": "node --check bin/agent-memory.js && node --check src/*.js && npm test",
+    "pack:check": "npm pack --dry-run",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shopapps/agent-memory-server.git",
+    "directory": "V0/installer"
+  },
+  "keywords": [
+    "agent-memory",
+    "claude",
+    "codex",
+    "docker",
+    "mcp"
+  ],
+  "license": "Apache-2.0"
+}

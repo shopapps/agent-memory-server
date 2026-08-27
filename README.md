@@ -41,7 +41,10 @@ For implementation details and usage examples, see:
 It serves as the research foundation and architectural starting point for Redis Agent Memory, but it is not the current supported production path.
 
 - **Start here:** [`V0/README.md`](./V0/README.md)
+- **Quickstart and manual installation:** [`INSTALL.md`](./INSTALL.md)
 - **Documentation:** [`V0/docs/`](./V0/docs/index.md)
+- **Local API docs after install:**
+  [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - Build, test, and run everything from inside `V0/` (e.g. `cd V0 && make test`).
 
 ## License

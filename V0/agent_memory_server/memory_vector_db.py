@@ -7,8 +7,10 @@ import json
 import logging
 import re
 from abc import ABC, abstractmethod
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from functools import reduce
+from hashlib import sha256
 from typing import Any
 
 import numpy as np
@@ -24,6 +26,7 @@ from redisvl.query.filter import FilterExpression
 from redisvl.utils.token_escaper import TokenEscaper
 
 from agent_memory_server.filters import (
+    AgentId,
     CreatedAt,
     DiscreteMemoryExtracted,
     Entities,
@@ -34,6 +37,7 @@ from agent_memory_server.filters import (
     MemoryHash,
     MemoryType,
     Namespace,
+    ProjectId,
     SessionId,
     Topics,
     UserId,
@@ -45,12 +49,17 @@ from agent_memory_server.models import (
     SearchModeEnum,
     SearchScoreTypeEnum,
 )
+from agent_memory_server.scopes import decode_scope, encode_scope
 from agent_memory_server.utils.recency import generate_memory_hash, rerank_with_recency
 from agent_memory_server.utils.redis_query import RecencyAggregationQuery
+from agent_memory_server.utils.search_index import index_field_names
 from agent_memory_server.utils.tag_codec import decode_tag_values, encode_tag_values
 
 
 logger = logging.getLogger(__name__)
+_REQUIRED_SCOPE_FIELDS = {"project_id", "agent_id"}
+_MEMORY_ID_LOCK_TIMEOUT_SECONDS = 300
+_MEMORY_ID_LOCK_BLOCKING_TIMEOUT_SECONDS = 30
 
 
 class _PhraseAwareQueryMixin:
@@ -163,6 +172,8 @@ class MemoryVectorDatabase(ABC):
         text_scorer: str = "BM25STD",
         session_id: SessionId | None = None,
         user_id: UserId | None = None,
+        project_id: ProjectId | None = None,
+        agent_id: AgentId | None = None,
         namespace: Namespace | None = None,
         created_at: CreatedAt | None = None,
         last_accessed: LastAccessed | None = None,
@@ -246,6 +257,8 @@ class MemoryVectorDatabase(ABC):
         self,
         namespace: str | None = None,
         user_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
         session_id: str | None = None,
     ) -> int:
         """Count memories matching the given filters.
@@ -265,6 +278,8 @@ class MemoryVectorDatabase(ABC):
         self,
         session_id: SessionId | None = None,
         user_id: UserId | None = None,
+        project_id: ProjectId | None = None,
+        agent_id: AgentId | None = None,
         namespace: Namespace | None = None,
         created_at: CreatedAt | None = None,
         last_accessed: LastAccessed | None = None,
@@ -388,6 +403,8 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         "text",
         "session_id",
         "user_id",
+        "project_id",
+        "agent_id",
         "namespace",
         "created_at",
         "last_accessed",
@@ -429,6 +446,26 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         if not self._index_created:
             if not await self._index.exists():
                 await self._index.create(overwrite=False)
+            else:
+                info = await self._index.info()
+                missing_fields = _REQUIRED_SCOPE_FIELDS - index_field_names(info)
+                if missing_fields:
+                    logger.info(
+                        "Rebuilding memory index to add fields: %s",
+                        ", ".join(sorted(missing_fields)),
+                    )
+                    try:
+                        await self._index.create(overwrite=True, drop=False)
+                    except Exception:
+                        current_info = await self._index.info()
+                        current_missing = _REQUIRED_SCOPE_FIELDS - index_field_names(
+                            current_info
+                        )
+                        if current_missing:
+                            raise
+                        logger.info(
+                            "Another process completed the memory index upgrade"
+                        )
             self._index_created = True
 
     def _memory_to_data(self, memory: MemoryRecord) -> dict[str, Any]:
@@ -474,8 +511,10 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         data: dict[str, Any] = {
             "text": memory.text,
             "id_": memory.id,
-            "session_id": memory.session_id or "",
-            "user_id": memory.user_id or "",
+            "session_id": encode_scope(memory.session_id),
+            "user_id": encode_scope(memory.user_id),
+            "project_id": encode_scope(memory.project_id),
+            "agent_id": encode_scope(memory.agent_id),
             "namespace": memory.namespace or "",
             "memory_type": memory_type_val,
             "extraction_strategy": memory.extraction_strategy or "",
@@ -586,8 +625,10 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             access_count_val = 0
 
         # Convert empty strings back to None for optional fields
-        session_id = fields.get("session_id") or None
-        user_id = fields.get("user_id") or None
+        session_id = decode_scope(fields.get("session_id"))
+        user_id = decode_scope(fields.get("user_id"))
+        project_id = decode_scope(fields.get("project_id"))
+        agent_id = decode_scope(fields.get("agent_id"))
         namespace = fields.get("namespace") or None
 
         extraction_strategy = fields.get("extraction_strategy")
@@ -601,6 +642,8 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             id=fields.get("id_", ""),
             session_id=session_id,
             user_id=user_id,
+            project_id=project_id,
+            agent_id=agent_id,
             namespace=namespace,
             created_at=created_at,
             last_accessed=last_accessed,
@@ -784,36 +827,86 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         await self._ensure_index()
 
         try:
-            # Prepare memories with defaults
+            incoming_scopes: dict[str, tuple[str | None, ...]] = {}
             for memory in memories:
-                if not memory.memory_hash:
-                    memory.memory_hash = self.generate_memory_hash(memory)
-                now = datetime.now(UTC)
-                if not memory.created_at:
-                    memory.created_at = now
-                if not memory.last_accessed:
-                    memory.last_accessed = now
-                if not memory.updated_at:
-                    memory.updated_at = now
+                scope = (
+                    memory.namespace,
+                    memory.project_id,
+                    memory.user_id,
+                    memory.agent_id,
+                    memory.session_id,
+                )
+                prior_scope = incoming_scopes.get(memory.id)
+                if prior_scope is not None and prior_scope != scope:
+                    raise ValueError(
+                        f"Memory id {memory.id} already exists in a different scope"
+                    )
+                incoming_scopes[memory.id] = scope
 
-            # Generate embeddings for all texts
+            # Generate embeddings before taking write locks. This keeps each lock
+            # focused on the ownership check and Redis write.
             texts = [memory.text for memory in memories]
             embeddings = await self.embeddings.aembed_documents(texts)
 
-            # Build data dicts with embeddings
-            data_list = []
-            memory_ids = []
-            for memory, embedding in zip(memories, embeddings, strict=False):
-                data = self._memory_to_data(memory)
-                data["vector"] = np.array(embedding, dtype=np.float32).tobytes()
-                data_list.append(data)
-                memory_ids.append(memory.id)
+            redis_client = self._index.client
+            if redis_client is None:
+                raise RuntimeError("RedisVL index has no Redis client")
 
-            # Load into Redis via RedisVL -- use id_field so keys are
-            # auto-generated with the index prefix (e.g. "memory_idx:<id>").
-            # Do NOT pass explicit keys, as that bypasses the prefix.
-            await self._index.load(data_list, id_field="id_")
-            return memory_ids
+            async with AsyncExitStack() as lock_stack:
+                # Stable ordering prevents two overlapping batches from waiting on
+                # each other's locks forever.
+                for memory_id in sorted(incoming_scopes):
+                    lock_digest = sha256(
+                        f"{self._index.prefix}\0{memory_id}".encode()
+                    ).hexdigest()
+                    lock = redis_client.lock(
+                        f"agent-memory-server:memory-id-lock:{lock_digest}",
+                        timeout=_MEMORY_ID_LOCK_TIMEOUT_SECONDS,
+                        blocking_timeout=_MEMORY_ID_LOCK_BLOCKING_TIMEOUT_SECONDS,
+                    )
+                    await lock_stack.enter_async_context(lock)
+
+                for memory_id, scope in incoming_scopes.items():
+                    existing = await self._index.fetch(memory_id)
+                    if not existing:
+                        continue
+                    existing_scope = (
+                        existing.get("namespace") or None,
+                        decode_scope(existing.get("project_id")),
+                        decode_scope(existing.get("user_id")),
+                        decode_scope(existing.get("agent_id")),
+                        decode_scope(existing.get("session_id")),
+                    )
+                    if existing_scope != scope:
+                        raise ValueError(
+                            f"Memory id {memory_id} already exists in a different scope"
+                        )
+
+                # Prepare memories with defaults
+                for memory in memories:
+                    if not memory.memory_hash:
+                        memory.memory_hash = self.generate_memory_hash(memory)
+                    now = datetime.now(UTC)
+                    if not memory.created_at:
+                        memory.created_at = now
+                    if not memory.last_accessed:
+                        memory.last_accessed = now
+                    if not memory.updated_at:
+                        memory.updated_at = now
+
+                # Build data dicts with embeddings
+                data_list = []
+                memory_ids = []
+                for memory, embedding in zip(memories, embeddings, strict=False):
+                    data = self._memory_to_data(memory)
+                    data["vector"] = np.array(embedding, dtype=np.float32).tobytes()
+                    data_list.append(data)
+                    memory_ids.append(memory.id)
+
+                # Keep the ID locks until RedisVL has completed the write.
+                # Use id_field so keys include the index prefix.
+                await self._index.load(data_list, id_field="id_")
+                return memory_ids
 
         except Exception as e:
             logger.error(f"Error adding memories to Redis: {e}")
@@ -827,6 +920,8 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         text_scorer: str = "BM25STD",
         session_id: SessionId | None = None,
         user_id: UserId | None = None,
+        project_id: ProjectId | None = None,
+        agent_id: AgentId | None = None,
         namespace: Namespace | None = None,
         created_at: CreatedAt | None = None,
         last_accessed: LastAccessed | None = None,
@@ -858,6 +953,8 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         redis_filter = self._build_filter_expression(
             session_id=session_id,
             user_id=user_id,
+            project_id=project_id,
+            agent_id=agent_id,
             namespace=namespace,
             memory_type=memory_type,
             extraction_strategy=extraction_strategy,
@@ -1047,6 +1144,8 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         self,
         namespace: str | None = None,
         user_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
         session_id: str | None = None,
     ) -> int:
         """Count memories using a filter-only query."""
@@ -1054,6 +1153,8 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             results = await self.list_memories(
                 namespace=Namespace(eq=namespace) if namespace else None,
                 user_id=UserId(eq=user_id) if user_id else None,
+                project_id=ProjectId(eq=project_id) if project_id else None,
+                agent_id=AgentId(eq=agent_id) if agent_id else None,
                 session_id=SessionId(eq=session_id) if session_id else None,
                 limit=10000,  # Large number to get all results
             )
@@ -1066,6 +1167,8 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         self,
         session_id: SessionId | None = None,
         user_id: UserId | None = None,
+        project_id: ProjectId | None = None,
+        agent_id: AgentId | None = None,
         namespace: Namespace | None = None,
         created_at: CreatedAt | None = None,
         last_accessed: LastAccessed | None = None,
@@ -1092,6 +1195,8 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             redis_filter = self._build_filter_expression(
                 session_id=session_id,
                 user_id=user_id,
+                project_id=project_id,
+                agent_id=agent_id,
                 namespace=namespace,
                 memory_type=memory_type,
                 extraction_strategy=extraction_strategy,

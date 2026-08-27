@@ -18,6 +18,7 @@ from agent_memory_server.api import (
 from agent_memory_server.config import settings
 from agent_memory_server.dependencies import get_background_tasks
 from agent_memory_server.filters import (
+    AgentId,
     CreatedAt,
     Entities,
     EventDate,
@@ -25,6 +26,7 @@ from agent_memory_server.filters import (
     LastAccessed,
     MemoryType,
     Namespace,
+    ProjectId,
     SessionId,
     Topics,
     UserId,
@@ -50,6 +52,7 @@ from agent_memory_server.models import (
     WorkingMemoryRequest,
     WorkingMemoryResponse,
 )
+from agent_memory_server.scopes import encode_scope
 
 
 logger = logging.getLogger(__name__)
@@ -468,12 +471,18 @@ async def search_long_term_memory(
     created_at: CreatedAt | None = None,
     last_accessed: LastAccessed | None = None,
     user_id: UserId | None = None,
+    project_id: ProjectId | None = None,
+    agent_id: AgentId | None = None,
     memory_type: MemoryType | None = None,
     extraction_strategy: ExtractionStrategy | None = None,
     event_date: EventDate | None = None,
     distance_threshold: float | None = None,
     limit: int = 10,
+    max_tokens: int | None = None,
+    max_results: int | None = None,
     offset: int = 0,
+    inherit_parents: bool = False,
+    include_shared: bool = False,
     optimize_query: bool = False,
     recency_boost: bool | None = None,
     recency_semantic_weight: float | None = None,
@@ -619,12 +628,18 @@ async def search_long_term_memory(
             created_at=created_at,
             last_accessed=last_accessed,
             user_id=user_id,
+            project_id=project_id,
+            agent_id=agent_id,
             memory_type=memory_type,
             extraction_strategy=extraction_strategy,
             event_date=event_date,
             distance_threshold=distance_threshold,
             limit=limit,
+            max_tokens=max_tokens,
+            max_results=max_results,
             offset=offset,
+            inherit_parents=inherit_parents,
+            include_shared=include_shared,
             recency_boost=recency_boost,
             recency_semantic_weight=recency_semantic_weight,
             recency_recency_weight=recency_recency_weight,
@@ -645,6 +660,9 @@ async def search_long_term_memory(
             total=results.total,
             memories=results.memories,
             next_offset=results.next_offset,
+            tokens_used=results.tokens_used,
+            token_budget=results.token_budget,
+            budget_exhausted=results.budget_exhausted,
         )
     except Exception as e:
         logger.error(f"Error in search_long_term_memory tool: {e}")
@@ -667,12 +685,18 @@ async def memory_prompt(
     created_at: CreatedAt | None = None,
     last_accessed: LastAccessed | None = None,
     user_id: UserId | None = None,
+    project_id: ProjectId | None = None,
+    agent_id: AgentId | None = None,
     memory_type: MemoryType | None = None,
     event_date: EventDate | None = None,
     distance_threshold: float | None = None,
     search_mode: SearchModeEnum = SearchModeEnum.SEMANTIC,
     limit: int = 10,
+    max_tokens: int | None = None,
+    max_results: int | None = None,
     offset: int = 0,
+    inherit_parents: bool = False,
+    include_shared: bool = False,
     optimize_query: bool = False,
     recency_boost: bool | None = None,
     recency_semantic_weight: float | None = None,
@@ -791,6 +815,8 @@ async def memory_prompt(
             session_id=_session_id,
             namespace=namespace.eq if namespace and namespace.eq else None,
             user_id=user_id.eq if user_id and user_id.eq else None,
+            project_id=project_id.eq if project_id and project_id.eq else None,
+            agent_id=agent_id.eq if agent_id and agent_id.eq else None,
             model_name=model_name,
             context_window_max=context_window_max,
         )
@@ -810,25 +836,37 @@ async def memory_prompt(
                 "distance_threshold is only supported for semantic search mode"
             )
 
-        # Do NOT pass session_id to the long-term search -- it scopes working
-        # memory retrieval, not the long-term memory search.  The REST API keeps
-        # these separate (session vs long_term_search); the MCP flat parameter
-        # space must not conflate them or long-term memories from other sessions
-        # will be excluded.
+        search_session_id = session_id
+        search_project_id = project_id
+        search_user_id = user_id
+        search_agent_id = agent_id
+        if session is not None:
+            search_session_id = SessionId(eq=session.session_id)
+            search_project_id = ProjectId(eq=encode_scope(session.project_id))
+            search_user_id = UserId(eq=encode_scope(session.user_id))
+            search_agent_id = AgentId(eq=encode_scope(session.agent_id))
+
         search_payload = SearchRequest(
             text=query,
+            session_id=search_session_id,
             namespace=namespace,
             topics=topics,
             entities=entities,
             created_at=created_at,
             last_accessed=last_accessed,
-            user_id=user_id,
+            user_id=search_user_id,
+            project_id=search_project_id,
+            agent_id=search_agent_id,
             distance_threshold=distance_threshold,
             memory_type=memory_type,
             event_date=event_date,
             search_mode=search_mode,
             limit=limit,
+            max_tokens=max_tokens,
+            max_results=max_results,
             offset=offset,
+            inherit_parents=inherit_parents,
+            include_shared=include_shared,
             recency_boost=recency_boost,
             recency_semantic_weight=recency_semantic_weight,
             recency_recency_weight=recency_recency_weight,
@@ -862,6 +900,8 @@ async def set_working_memory(
     data: dict[str, Any] | None = None,
     namespace: str | None = settings.default_mcp_namespace,
     user_id: str | None = settings.default_mcp_user_id,
+    project_id: str | None = None,
+    agent_id: str | None = None,
     ttl_seconds: int = 3600,
     long_term_memory_strategy: MemoryStrategyConfig | None = None,
 ) -> WorkingMemoryResponse:
@@ -980,6 +1020,8 @@ async def set_working_memory(
                     update={
                         "id": memory_id,
                         "user_id": user_id,
+                        "project_id": project_id,
+                        "agent_id": agent_id,
                         "persisted_at": None,  # Mark as pending promotion
                     }
                 )
@@ -1026,6 +1068,8 @@ async def set_working_memory(
         context=context,
         data=data or {},
         user_id=user_id,
+        project_id=project_id,
+        agent_id=agent_id,
         ttl_seconds=ttl_seconds,
         long_term_memory_strategy=long_term_memory_strategy or MemoryStrategyConfig(),
     )
@@ -1046,6 +1090,8 @@ async def get_working_memory(
     session_id: str,
     user_id: str | None = None,
     namespace: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
     recent_messages_limit: int | None = None,
 ) -> WorkingMemory:
     """
@@ -1066,6 +1112,8 @@ async def get_working_memory(
         session_id=session_id,
         user_id=user_id,
         namespace=namespace,
+        project_id=project_id,
+        agent_id=agent_id,
         recent_messages_limit=recent_messages_limit,
     )
     if result is None:
@@ -1108,6 +1156,8 @@ async def edit_long_term_memory(
     memory_type: MemoryTypeEnum | None = None,
     namespace: str | None = None,
     user_id: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
     session_id: str | None = None,
     event_date: str | None = None,
     pinned: bool | None = None,
@@ -1129,6 +1179,8 @@ async def edit_long_term_memory(
         memory_type: Updated memory type ("semantic", "episodic", or "message")
         namespace: Updated namespace for organizing the memory
         user_id: Updated user ID associated with the memory
+        project_id: Updated project ID associated with the memory
+        agent_id: Updated agent ID associated with the memory
         session_id: Updated session ID where the memory originated
         event_date: Updated event date for episodic memories (ISO 8601 format: "2024-01-15T14:30:00Z")
         pinned: Whether this memory is pinned and protected from auto-deletion
@@ -1215,6 +1267,8 @@ async def edit_long_term_memory(
         "memory_type": memory_type,
         "namespace": namespace,
         "user_id": user_id,
+        "project_id": project_id,
+        "agent_id": agent_id,
         "session_id": session_id,
         "event_date": (
             _parse_iso8601_datetime(event_date) if event_date is not None else None

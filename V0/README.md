@@ -31,6 +31,12 @@ A memory layer for AI agents.
 
 ## Quick Start
 
+For a guided Mac setup that starts Docker and connects Codex or Claude, see the
+[one-command quickstart and manual install guide](../INSTALL.md).
+
+After the server starts, open the local API docs at
+[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
+
 ### 1. Installation
 
 #### Using Docker

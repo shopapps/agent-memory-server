@@ -56,7 +56,8 @@ class TestIssue237TiktokenFallback:
             ),
         ):
             get_response = await client.get(
-                f"/v1/working-memory/{session_id}?model_name=gpt-4o"
+                f"/v1/working-memory/{session_id}",
+                params={"model_name": "gpt-4o", "user_id": "alice"},
             )
 
         assert get_response.status_code == 200, get_response.text

@@ -144,6 +144,8 @@ def _build_redis_schema() -> dict:
             {"name": "text", "type": "text"},
             {"name": "session_id", "type": "tag"},
             {"name": "user_id", "type": "tag"},
+            {"name": "project_id", "type": "tag"},
+            {"name": "agent_id", "type": "tag"},
             {"name": "namespace", "type": "tag"},
             {"name": "memory_type", "type": "tag"},
             {"name": "topics", "type": "tag", "attrs": {"separator": ","}},
@@ -199,6 +201,16 @@ def create_redis_memory_vector_db(
     except Exception as e:
         logger.error(f"Error creating Redis memory vector database: {e}")
         raise
+
+
+async def ensure_redis_memory_index(redis_client) -> None:
+    """Create or upgrade the Redis memory index without loading an AI model."""
+    index = AsyncSearchIndex.from_dict(
+        _build_redis_schema(),
+        redis_client=redis_client,
+    )
+    database = RedisVLMemoryVectorDatabase(index, embeddings=None)
+    await database._ensure_index()
 
 
 def create_memory_vector_db() -> MemoryVectorDatabase:

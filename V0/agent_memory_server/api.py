@@ -11,7 +11,7 @@ from agent_memory_server import long_term_memory, working_memory
 from agent_memory_server.auth import UserInfo, get_current_user
 from agent_memory_server.config import settings
 from agent_memory_server.dependencies import HybridBackgroundTasks
-from agent_memory_server.filters import SessionId, UserId
+from agent_memory_server.filters import AgentId, ProjectId, SessionId, UserId
 from agent_memory_server.llm import LLMClient
 from agent_memory_server.logging import get_logger
 from agent_memory_server.models import (
@@ -41,6 +41,12 @@ from agent_memory_server.models import (
     WorkingMemory,
     WorkingMemoryResponse,
 )
+from agent_memory_server.retrieval import (
+    LONG_TERM_MEMORY_PROMPT_HEADING,
+    format_memory_prompt_block,
+    pack_memory_results,
+)
+from agent_memory_server.scopes import encode_scope
 from agent_memory_server.summarization import _incremental_summary
 from agent_memory_server.summary_views import (
     get_summary_view as get_summary_view_config,
@@ -156,6 +162,38 @@ def _count_text_tokens(text: str) -> int:
 def _count_message_tokens(message: MemoryMessage) -> int:
     """Count tokens for a single working-memory message."""
     return _count_text_tokens(f"{message.role}: {message.content}")
+
+
+def _apply_search_budget(
+    results: MemoryRecordResultsResponse,
+    payload: SearchRequest,
+) -> MemoryRecordResultsResponse:
+    """Apply the optional hard token budget after ranking is complete."""
+    if payload.max_tokens is None:
+        if payload.max_results is not None:
+            results.memories = results.memories[: payload.max_results]
+        return results
+
+    return pack_memory_results(
+        results,
+        max_tokens=payload.max_tokens,
+        max_results=payload.max_results or payload.limit,
+        count_tokens=_count_text_tokens,
+        prefix=payload._token_prefix,
+    )
+
+
+def _finalize_search_results(
+    results: MemoryRecordResultsResponse,
+    payload: SearchRequest,
+    background_tasks: HybridBackgroundTasks,
+) -> MemoryRecordResultsResponse:
+    """Pack results and record access only for memories returned to the caller."""
+    final_results = _apply_search_budget(results, payload)
+    ids = [memory.id for memory in final_results.memories if memory.id]
+    if ids:
+        background_tasks.add_task(long_term_memory.update_last_accessed, ids)
+    return final_results
 
 
 def _calculate_context_usage_percentages(
@@ -383,6 +421,8 @@ async def list_sessions(
         offset=options.offset,
         namespace=options.namespace,
         user_id=options.user_id,
+        project_id=options.project_id,
+        agent_id=options.agent_id,
     )
 
     return SessionListResponse(
@@ -396,6 +436,8 @@ async def get_working_memory(
     session_id: str,
     user_id: str | None = None,
     namespace: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
     model_name: ModelNameLiteral | None = None,
     context_window_max: int | None = None,
     recent_messages_limit: int | None = None,
@@ -425,6 +467,8 @@ async def get_working_memory(
         namespace=namespace,
         redis_client=redis,
         user_id=user_id,
+        project_id=project_id,
+        agent_id=agent_id,
         recent_messages_limit=recent_messages_limit,
     )
 
@@ -538,6 +582,8 @@ async def put_working_memory_core(
             session_id=session_id,
             user_id=updated_memory.user_id,
             namespace=updated_memory.namespace,
+            project_id=updated_memory.project_id,
+            agent_id=updated_memory.agent_id,
         )
 
     # Calculate context usage percentages based on the final state (after potential summarization)
@@ -619,6 +665,8 @@ async def delete_working_memory(
     session_id: str,
     user_id: str | None = None,
     namespace: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
     current_user: UserInfo = Depends(get_current_user),
 ):
     """
@@ -641,6 +689,8 @@ async def delete_working_memory(
         session_id=session_id,
         user_id=user_id,
         namespace=namespace,
+        project_id=project_id,
+        agent_id=agent_id,
         redis_client=redis,
     )
 
@@ -686,7 +736,11 @@ async def create_long_term_memory(
     return AckResponse(status="ok")
 
 
-@router.post("/v1/long-term-memory/search", response_model=MemoryRecordResultsResponse)
+@router.post(
+    "/v1/long-term-memory/search",
+    response_model=MemoryRecordResultsResponse,
+    response_model_exclude_none=True,
+)
 async def search_long_term_memory(
     payload: SearchRequest,
     background_tasks: HybridBackgroundTasks,
@@ -725,7 +779,11 @@ async def search_long_term_memory(
         "hybrid_alpha": payload.hybrid_alpha,
         "text_scorer": payload.text_scorer,
         "distance_threshold": payload.distance_threshold,
-        "limit": payload.limit,
+        "limit": (
+            min(100, max((payload.max_results or payload.limit) * 4, payload.limit))
+            if payload.max_tokens is not None
+            else min(payload.limit, payload.max_results or payload.limit)
+        ),
         "offset": payload.offset,
         "optimize_query": optimize_query,
         **filters,
@@ -744,7 +802,8 @@ async def search_long_term_memory(
     if server_side_recency:
         kwargs["server_side_recency"] = True
         kwargs["recency_params"] = _build_recency_params(payload)
-        return await long_term_memory.search_long_term_memories(**kwargs)
+        results = await long_term_memory.search_long_term_memories(**kwargs)
+        return _finalize_search_results(results, payload, background_tasks)
 
     raw_results = await long_term_memory.search_long_term_memories(**kwargs)
 
@@ -756,7 +815,6 @@ async def search_long_term_memory(
             for key in (
                 "topics",
                 "entities",
-                "namespace",
                 "memory_type",
                 "extraction_strategy",
                 "event_date",
@@ -772,7 +830,6 @@ async def search_long_term_memory(
             for key in (
                 "topics",
                 "entities",
-                "namespace",
                 "memory_type",
                 "extraction_strategy",
                 "event_date",
@@ -840,22 +897,17 @@ async def search_long_term_memory(
             payload.recency_boost if payload.recency_boost is not None else True
         )
         if not recency_boost or not raw_results.memories:
-            return raw_results
+            return _finalize_search_results(raw_results, payload, background_tasks)
 
         now = _dt.now(UTC)
         recency_params = _build_recency_params(payload)
         ranked = long_term_memory.rerank_with_recency(
             raw_results.memories, now=now, params=recency_params
         )
-        # Update last_accessed in background with rate limiting
-        ids = [m.id for m in ranked if m.id]
-        if ids:
-            background_tasks.add_task(long_term_memory.update_last_accessed, ids)
-
         raw_results.memories = ranked
-        return raw_results
+        return _finalize_search_results(raw_results, payload, background_tasks)
     except Exception:
-        return raw_results
+        return _finalize_search_results(raw_results, payload, background_tasks)
 
 
 @router.delete("/v1/long-term-memory", response_model=AckResponse)
@@ -970,7 +1022,11 @@ async def update_long_term_memory(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/v1/memory/prompt", response_model=MemoryPromptResponse)
+@router.post(
+    "/v1/memory/prompt",
+    response_model=MemoryPromptResponse,
+    response_model_exclude_none=True,
+)
 async def memory_prompt(
     params: MemoryPromptRequest,
     background_tasks: HybridBackgroundTasks,
@@ -1021,6 +1077,8 @@ async def memory_prompt(
             session_id=params.session.session_id,
             namespace=params.session.namespace,
             user_id=params.session.user_id,
+            project_id=params.session.project_id,
+            agent_id=params.session.agent_id,
             redis_client=redis,
         )
 
@@ -1032,6 +1090,8 @@ async def memory_prompt(
                 session_id=params.session.session_id,
                 namespace=params.session.namespace,
                 user_id=params.session.user_id,
+                project_id=params.session.project_id,
+                agent_id=params.session.agent_id,
                 messages=[],
                 memories=[],
             )
@@ -1096,18 +1156,32 @@ async def memory_prompt(
         if isinstance(params.long_term_search, bool):
             search_kwargs = {}
             if params.session:
-                # Exclude memories from the current session because we already included them
-                search_kwargs["session_id"] = SessionId(ne=params.session.session_id)
-            if params.session and params.session.user_id:
-                search_kwargs["user_id"] = UserId(eq=params.session.user_id)
+                search_kwargs.update(
+                    {
+                        "session_id": SessionId(eq=params.session.session_id),
+                        "project_id": ProjectId(
+                            eq=encode_scope(params.session.project_id)
+                        ),
+                        "user_id": UserId(eq=encode_scope(params.session.user_id)),
+                        "agent_id": AgentId(eq=encode_scope(params.session.agent_id)),
+                    }
+                )
             search_payload = SearchRequest(**search_kwargs, limit=20, offset=0)
         else:
             search_payload = params.long_term_search.model_copy()
             # Set the query text for the search
             search_payload.text = params.query
-            # Merge session user_id into the search request if not already specified
-            if params.session and params.session.user_id and not search_payload.user_id:
-                search_payload.user_id = UserId(eq=params.session.user_id)
+            if params.session:
+                search_payload.session_id = SessionId(eq=params.session.session_id)
+                search_payload.project_id = ProjectId(
+                    eq=encode_scope(params.session.project_id)
+                )
+                search_payload.user_id = UserId(eq=encode_scope(params.session.user_id))
+                search_payload.agent_id = AgentId(
+                    eq=encode_scope(params.session.agent_id)
+                )
+
+        search_payload._token_prefix = LONG_TERM_MEMORY_PROMPT_HEADING
 
         logger.debug(f"[memory_prompt] Search payload: {search_payload}")
         long_term_memories = await search_long_term_memory(
@@ -1118,25 +1192,25 @@ async def memory_prompt(
 
         logger.debug(f"[memory_prompt] Long-term memories: {long_term_memories}")
 
-        if long_term_memories.total > 0:
-            long_term_memories_text = "\n".join(
-                [f"- {m.text} (ID: {m.id})" for m in long_term_memories.memories]
-            )
+        if long_term_memories.memories:
             _messages.append(
                 SystemMessage(
                     content=TextContent(
                         type="text",
-                        text=f"## Long term memories related to the user's query\n {long_term_memories_text}",
+                        text=format_memory_prompt_block(long_term_memories.memories),
                     ),
                 )
             )
-        else:
+        elif search_payload.max_tokens is None:
             # Always include a system message about long-term memories, even if empty
             _messages.append(
                 SystemMessage(
                     content=TextContent(
                         type="text",
-                        text="## Long term memories related to the user's query\n No relevant long-term memories found.",
+                        text=(
+                            f"{LONG_TERM_MEMORY_PROMPT_HEADING}\n "
+                            "No relevant long-term memories found."
+                        ),
                     ),
                 )
             )
@@ -1154,7 +1228,15 @@ async def memory_prompt(
         else None
     )
 
-    return MemoryPromptResponse(messages=_messages, long_term_memories=ltm_results)
+    return MemoryPromptResponse(
+        messages=_messages,
+        long_term_memories=ltm_results,
+        tokens_used=(long_term_memories.tokens_used if long_term_memories else None),
+        token_budget=(long_term_memories.token_budget if long_term_memories else None),
+        budget_exhausted=(
+            long_term_memories.budget_exhausted if long_term_memories else None
+        ),
+    )
 
 
 def _validate_summary_view_keys(payload: CreateSummaryViewRequest) -> None:
