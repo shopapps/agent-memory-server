@@ -2,8 +2,14 @@ import path from "node:path";
 
 import { InstallerError } from "./errors.js";
 
-export const RULES_BLOCK_START = "<!-- >>> @umony/agent-memory shared-memory rules >>> -->";
-export const RULES_BLOCK_END = "<!-- <<< @umony/agent-memory shared-memory rules <<< -->";
+export const RULES_BLOCK_START = "<!-- >>> @shopapps/agent-memory shared-memory rules >>> -->";
+export const RULES_BLOCK_END = "<!-- <<< @shopapps/agent-memory shared-memory rules <<< -->";
+const LEGACY_RULES_BLOCK_START = "<!-- >>> @umony/agent-memory shared-memory rules >>> -->";
+const LEGACY_RULES_BLOCK_END = "<!-- <<< @umony/agent-memory shared-memory rules <<< -->";
+const RULES_MARKER_PAIRS = [
+  { end: RULES_BLOCK_END, start: RULES_BLOCK_START },
+  { end: LEGACY_RULES_BLOCK_END, start: LEGACY_RULES_BLOCK_START },
+];
 
 export async function rulesTargetPaths(system, agent, scope, projectDir) {
   if (!["codex", "claude"].includes(agent)) {
@@ -404,26 +410,38 @@ async function readUtf8(system, actualPath, shownPath) {
 }
 
 function managedRulesRange(content, target) {
-  const starts = markerMatches(content, RULES_BLOCK_START);
-  const ends = markerMatches(content, RULES_BLOCK_END);
-  const rawStarts = countOccurrences(content, RULES_BLOCK_START);
-  const rawEnds = countOccurrences(content, RULES_BLOCK_END);
-  if (starts.length === 0 && ends.length === 0) {
-    if (rawStarts > 0 || rawEnds > 0) {
+  const found = [];
+  let rawMarkerCount = 0;
+  for (const pair of RULES_MARKER_PAIRS) {
+    const starts = markerMatches(content, pair.start);
+    const ends = markerMatches(content, pair.end);
+    const rawStarts = countOccurrences(content, pair.start);
+    const rawEnds = countOccurrences(content, pair.end);
+    rawMarkerCount += rawStarts + rawEnds;
+    if (starts.length === 0 && ends.length === 0) {
+      continue;
+    }
+    if (
+      starts.length !== 1
+      || ends.length !== 1
+      || rawStarts !== 1
+      || rawEnds !== 1
+      || starts[0] >= ends[0]
+    ) {
+      throw rulesConflict(target, "Its managed markers are missing, repeated, or out of order.");
+    }
+    found.push({ start: starts[0], end: ends[0] + pair.end.length });
+  }
+  if (found.length === 0) {
+    if (rawMarkerCount > 0) {
       throw rulesConflict(target, "Its managed markers must be on exact lines without extra spaces.");
     }
     return null;
   }
-  if (
-    starts.length !== 1
-    || ends.length !== 1
-    || rawStarts !== 1
-    || rawEnds !== 1
-    || starts[0] >= ends[0]
-  ) {
+  if (found.length !== 1) {
     throw rulesConflict(target, "Its managed markers are missing, repeated, or out of order.");
   }
-  return { start: starts[0], end: ends[0] + RULES_BLOCK_END.length };
+  return found[0];
 }
 
 function markerMatches(content, marker) {

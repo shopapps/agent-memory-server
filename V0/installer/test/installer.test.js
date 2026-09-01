@@ -21,6 +21,120 @@ test("mergeEnv preserves unknown settings and replaces owned keys", () => {
   assert.match(merged, /AMS_MCP_PORT="9050"/);
 });
 
+test("new installs use the Shopapps support folder", async () => {
+  const fixture = await createFixture();
+
+  assert.equal(
+    fixture.installer.paths().root,
+    path.join(
+      fixture.home,
+      "Library",
+      "Application Support",
+      "Shopapps",
+      "Agent Memory",
+    ),
+  );
+});
+
+test("legacy installs keep their existing support folder", async () => {
+  const fixture = await createFixture();
+  const legacyRoot = path.join(
+    fixture.home,
+    "Library",
+    "Application Support",
+    "Umony",
+    "Agent Memory",
+  );
+  await fixture.system.writeFileAtomic(
+    path.join(legacyRoot, "install.json"),
+    `${JSON.stringify({ phase: "ready" })}\n`,
+    0o600,
+  );
+
+  assert.equal(await fixture.installer.hasSavedInstall(), true);
+  assert.equal(fixture.installer.paths().root, legacyRoot);
+});
+
+test("legacy Docker files without install state keep the legacy identity", async () => {
+  const fixture = await createFixture({
+    env: { AMS_REDIS_VOLUME: "wrong-volume" },
+  });
+  const legacyRoot = path.join(
+    fixture.home,
+    "Library",
+    "Application Support",
+    "Umony",
+    "Agent Memory",
+  );
+  await fixture.system.writeFileAtomic(
+    path.join(legacyRoot, "runtime.env"),
+    "OPENAI_API_KEY=\"test-secret\"\n",
+    0o600,
+  );
+
+  await fixture.installer.run("install", {
+    agents: ["codex"],
+    apiPort: 8000,
+    mcpPort: 9050,
+    projectDir: fixture.project,
+    scope: "user",
+  });
+
+  const state = JSON.parse(
+    await readFile(path.join(legacyRoot, "install.json"), "utf8"),
+  );
+  assert.equal(state.composeProject, "umony-agent-memory");
+  assert.equal(state.redisVolume, "umony-agent-memory-redis-data");
+  const up = fixture.calls.find(
+    (call) => call.command === "docker" && call.args.includes("up"),
+  );
+  assert.equal(
+    up.args[up.args.indexOf("--project-name") + 1],
+    "umony-agent-memory",
+  );
+  assert.equal(
+    up.options.env.AMS_REDIS_VOLUME,
+    "umony-agent-memory-redis-data",
+  );
+});
+
+test("two owned install roots stop before either is changed", async () => {
+  const fixture = await createFixture();
+  const currentRoot = path.join(
+    fixture.home,
+    "Library",
+    "Application Support",
+    "Shopapps",
+    "Agent Memory",
+  );
+  const legacyRoot = path.join(
+    fixture.home,
+    "Library",
+    "Application Support",
+    "Umony",
+    "Agent Memory",
+  );
+  for (const root of [currentRoot, legacyRoot]) {
+    await fixture.system.writeFileAtomic(
+      path.join(root, "install.json"),
+      `${JSON.stringify({ phase: "ready" })}\n`,
+      0o600,
+    );
+  }
+
+  await assert.rejects(fixture.installer.hasSavedInstall(), {
+    code: "E_INSTALL_PATH_CONFLICT",
+  });
+  assert.equal(
+    JSON.parse(await readFile(path.join(currentRoot, "install.json"), "utf8")).phase,
+    "ready",
+  );
+  assert.equal(
+    JSON.parse(await readFile(path.join(legacyRoot, "install.json"), "utf8")).phase,
+    "ready",
+  );
+});
+
 test("installs the runtime before adding client configuration", async () => {
   const fixture = await createFixture();
   const result = await fixture.installer.run("install", {
@@ -43,17 +157,19 @@ test("installs the runtime before adding client configuration", async () => {
   const paths = fixture.installer.paths();
   const saved = JSON.parse(await readFile(paths.state, "utf8"));
   assert.equal(saved.phase, "ready");
+  assert.equal(saved.composeProject, "shopapps-agent-memory");
+  assert.equal(saved.redisVolume, "shopapps-agent-memory-redis-data");
   assert.deepEqual(Object.keys(saved.agents), ["codex", "claude"]);
   assert.equal((await stat(paths.runtimeEnv)).mode & 0o777, 0o600);
   assert.equal((await lstat(path.join(fixture.home, ".agents", "skills", "shared-memory"))).isSymbolicLink(), true);
   assert.equal((await lstat(path.join(fixture.home, ".claude", "skills", "shared-memory"))).isSymbolicLink(), true);
   assert.match(
     await readFile(path.join(fixture.home, ".codex", "AGENTS.md"), "utf8"),
-    /@umony\/agent-memory shared-memory rules/,
+    /@shopapps\/agent-memory shared-memory rules/,
   );
   assert.match(
     await readFile(path.join(fixture.home, ".claude", "CLAUDE.md"), "utf8"),
-    /@umony\/agent-memory shared-memory rules/,
+    /@shopapps\/agent-memory shared-memory rules/,
   );
   const rulesState = JSON.parse(await readFile(paths.rulesState, "utf8"));
   assert.equal(rulesState.installations[0].files.length, 2);
@@ -143,7 +259,7 @@ test("Docker reset rebuilds app containers and preserves Redis data", async () =
     "--target",
     "standard",
     "--tag",
-    "umony/agent-memory-server:local",
+    "shopapps/agent-memory-server:local",
   ]);
   const down = fixture.calls.find(
     (call) => call.command === "docker" && call.args.includes("down"),
@@ -167,11 +283,11 @@ test("Docker reset rebuilds app containers and preserves Redis data", async () =
   );
   assert.equal(
     appUp.options.env.AMS_IMAGE,
-    "umony/agent-memory-server:local",
+    "shopapps/agent-memory-server:local",
   );
   assert.equal(await readFile(paths.runtimeEnv, "utf8"), runtimeBefore);
   const state = JSON.parse(await readFile(paths.state, "utf8"));
-  assert.equal(state.localSourceImage, "umony/agent-memory-server:local");
+  assert.equal(state.localSourceImage, "shopapps/agent-memory-server:local");
 });
 
 test("Docker install refreshes app containers without taking Redis down", async () => {
@@ -216,7 +332,7 @@ test("Docker install performs first setup and ends on the local source image", a
     await readFile(fixture.installer.paths().state, "utf8"),
   );
   assert.equal(state.phase, "ready");
-  assert.equal(state.localSourceImage, "umony/agent-memory-server:local");
+  assert.equal(state.localSourceImage, "shopapps/agent-memory-server:local");
 });
 
 test("Docker install applies supplied settings to an existing setup", async () => {
@@ -245,7 +361,7 @@ test("Docker install applies supplied settings to an existing setup", async () =
     await readFile(fixture.installer.paths().state, "utf8"),
   );
   assert.equal(state.apiPort, 8010);
-  assert.equal(state.localSourceImage, "umony/agent-memory-server:local");
+  assert.equal(state.localSourceImage, "shopapps/agent-memory-server:local");
 });
 
 test("Docker up requires the local source image", async () => {
@@ -416,7 +532,75 @@ test("normal start keeps using the saved local source image", async () => {
   const up = fixture.calls.find(
     (call) => call.command === "docker" && call.args.includes("up"),
   );
+  assert.equal(up.options.env.AMS_IMAGE, "shopapps/agent-memory-server:local");
+});
+
+test("an older install keeps its Docker project, volume, and local image", async () => {
+  const fixture = await createFixture({
+    env: { AMS_REDIS_VOLUME: "wrong-volume" },
+  });
+  const legacyRoot = path.join(
+    fixture.home,
+    "Library",
+    "Application Support",
+    "Umony",
+    "Agent Memory",
+  );
+  await fixture.system.writeFileAtomic(
+    path.join(legacyRoot, "install.json"),
+    `${JSON.stringify({
+      apiPort: 8000,
+      composeProject: "umony-agent-memory",
+      localSourceImage: "umony/agent-memory-server:local",
+      phase: "ready",
+    })}\n`,
+    0o600,
+  );
+
+  await fixture.installer.run("start", {});
+
+  const volumeCheck = fixture.calls.find(
+    (call) => call.command === "docker" && call.args[0] === "volume",
+  );
+  assert.deepEqual(volumeCheck.args, [
+    "volume",
+    "inspect",
+    "umony-agent-memory-redis-data",
+  ]);
+  const up = fixture.calls.find(
+    (call) => call.command === "docker" && call.args.includes("up"),
+  );
+  assert.equal(
+    up.args[up.args.indexOf("--project-name") + 1],
+    "umony-agent-memory",
+  );
   assert.equal(up.options.env.AMS_IMAGE, "umony/agent-memory-server:local");
+  assert.equal(
+    up.options.env.AMS_REDIS_VOLUME,
+    "umony-agent-memory-redis-data",
+  );
+});
+
+test("a missing saved memory volume stops before Docker is changed", async () => {
+  const controls = {};
+  const fixture = await createFixture(controls);
+  await fixture.installer.run("install", {
+    agents: ["codex"],
+    apiPort: 8000,
+    mcpPort: 9050,
+    projectDir: fixture.project,
+    scope: "user",
+  });
+  fixture.calls.length = 0;
+  controls.missingMemoryVolume = true;
+
+  await assert.rejects(fixture.installer.run("start", {}), {
+    code: "E_MEMORY_VOLUME_MISSING",
+  });
+  assert.equal(
+    fixture.calls.some((call) => call.args.includes("up")),
+    false,
+  );
 });
 
 test("rules-only install updates instruction files without touching Docker, MCP, or Skills", async () => {
@@ -956,7 +1140,7 @@ async function createFixture(options = {}) {
   let claudeAddFailed = false;
   const system = createSystem({
     cwd: project,
-    env: { OPENAI_API_KEY: "test-secret" },
+    env: { OPENAI_API_KEY: "test-secret", ...(options.env ?? {}) },
     fetch: async () => ({ ok: true }),
     home,
     input: { isTTY: true },
@@ -990,6 +1174,14 @@ async function createFixture(options = {}) {
       if (["codex", "claude"].includes(command) && args[1] === "remove") {
         mcp.delete(command);
         return success();
+      }
+      if (
+        command === "docker"
+        && options.missingMemoryVolume
+        && args[0] === "volume"
+        && args[1] === "inspect"
+      ) {
+        return { code: 1, stderr: "missing", stdout: "" };
       }
       if (
         command === "docker"

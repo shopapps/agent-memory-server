@@ -32,7 +32,7 @@ form does the same thing and remains supported:
 npx --yes ./V0/installer docker:install
 ```
 
-Do not use `npx @umony/agent-memory@latest`. That name is not on npm and will
+Do not use `npx @shopapps/agent-memory@latest`. That name is not on npm and will
 return a `404 Not Found` error.
 
 To run it from another folder, use the full path to your checkout:
@@ -77,7 +77,7 @@ team to review and share.
 
 Global rules choose a separate memory name for each Git repository. Project
 rules use the project folder name by default. Set an exact name with
-`--namespace umony/acr`. A namespace is simply the memory folder name shared
+`--namespace shopapps/acr`. A namespace is simply the memory folder name shared
 by Codex and Claude.
 
 ### Quickstart needs and assumptions
@@ -102,7 +102,7 @@ off. Do not expose this setup to a network or use it as a production service.
 The installer stores its settings under:
 
 ```text
-~/Library/Application Support/Umony/Agent Memory
+~/Library/Application Support/Shopapps/Agent Memory
 ```
 
 Its secret file is readable only by the current Mac user. Redis data lives in
@@ -139,12 +139,17 @@ to skip the confirmation question.
 These commands use the installed settings and API key without printing them.
 The first setup creates those files. Later Docker commands leave them as they
 are. The commands build the local image as
-`umony/agent-memory-server:local`.
+`shopapps/agent-memory-server:local`.
 
-Both reset forms keep the named `umony-agent-memory-redis-data` volume. That
+Both reset forms keep the named `shopapps-agent-memory-redis-data` volume. That
 volume contains the memory database. The Redis container may be recreated, but
 the same database volume is attached again. The Skill, MCP settings, agent
 rules, and API key are also kept.
+
+An install made before the Shopapps rename keeps its older internal folder,
+Docker project, and volume names. This is deliberate. It keeps the same saved
+memories attached. A later source rebuild changes only its local image tag.
+Fresh installs use the Shopapps names shown here.
 
 Never add `-v` or `--volumes` to a Docker Compose `down` command. Those flags
 remove the saved database volume.
@@ -381,7 +386,7 @@ For one repository only, pass its full path while running the command from the
   --agents codex \
   --scope project \
   --project-dir "/path/to/your/project" \
-  --namespace umony/acr \
+  --namespace shopapps/acr \
   --yes
 ```
 
@@ -398,7 +403,7 @@ npx --yes ./V0/installer rules update \
   --agents all \
   --scope project \
   --project-dir "/path/to/your/project" \
-  --namespace umony/acr \
+  --namespace shopapps/acr \
   --yes
 ```
 
@@ -428,7 +433,7 @@ agent-memory --help
 ```
 
 After that, replace `npx --yes ./V0/installer` with `agent-memory` in the
-examples above. Run `npm unlink --global @umony/agent-memory` to remove the
+examples above. Run `npm unlink --global @shopapps/agent-memory` to remove the
 link. This is optional. It adds a global command and may clash with the Python
 server command, which is also named `agent-memory`. The local `npx` path is the
 safer choice.
@@ -440,7 +445,7 @@ available from the npm registry. Only after the team chooses to publish it will
 this command work:
 
 ```bash
-npx --yes @umony/agent-memory@latest
+npx --yes @shopapps/agent-memory@latest
 ```
 
 Before publishing, build a matching project-owned server image and update the

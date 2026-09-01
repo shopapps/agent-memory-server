@@ -20,7 +20,20 @@ import {
   upsertRulesFile,
 } from "./rules.js";
 
-const LOCAL_SOURCE_IMAGE = "umony/agent-memory-server:local";
+const CURRENT_PRODUCT = {
+  composeProject: "shopapps-agent-memory",
+  localImage: "shopapps/agent-memory-server:local",
+  redisVolume: "shopapps-agent-memory-redis-data",
+};
+const LEGACY_PRODUCT = {
+  composeProject: "umony-agent-memory",
+  localImage: "umony/agent-memory-server:local",
+  redisVolume: "umony-agent-memory-redis-data",
+};
+const LOCAL_SOURCE_IMAGES = new Set([
+  CURRENT_PRODUCT.localImage,
+  LEGACY_PRODUCT.localImage,
+]);
 const LOCAL_APP_SERVICES = ["api", "mcp", "worker"];
 
 export class Installer {
@@ -28,9 +41,12 @@ export class Installer {
     this.system = system;
     this.packageRoot = packageRoot;
     this.ui = ui;
+    this.activePaths = null;
+    this.pathsReady = null;
   }
 
   async run(command, options) {
+    await this.prepareInstallRoot();
     switch (command) {
       case "install":
       case "update":
@@ -66,11 +82,13 @@ export class Installer {
   }
 
   async hasSavedInstall() {
+    await this.prepareInstallRoot();
     const state = await this.readState(this.paths());
     return Boolean(state && state.phase !== "uninstalled");
   }
 
   async hasSavedRules() {
+    await this.prepareInstallRoot();
     const registry = await this.readRulesRegistry(this.paths());
     return registry.installations.length > 0;
   }
@@ -81,6 +99,7 @@ export class Installer {
     const rulesRegistry = await this.readRulesRegistry(paths);
     const savedState = await this.readState(paths);
     const existingState = savedState?.phase === "uninstalled" ? null : savedState;
+    const identity = this.runtimeIdentity(savedState, manifest);
     const scope = options.scope ?? existingState?.scope ?? "user";
     let projectDir = path.resolve(
       options.projectDir ?? existingState?.projectDir ?? this.system.cwd,
@@ -133,6 +152,9 @@ export class Installer {
       savedRules,
     );
     await this.preflightDocker();
+    if (savedState) {
+      await this.assertMemoryVolume(identity.redisVolume);
+    }
     const apiPort = options.apiPort ?? existingState?.apiPort ?? 8000;
     const mcpPort = options.mcpPort ?? existingState?.mcpPort ?? 9050;
     const mcpUrl = `http://127.0.0.1:${mcpPort}/mcp`;
@@ -153,7 +175,7 @@ export class Installer {
       agents,
       apiUrl: `http://127.0.0.1:${apiPort}`,
       command,
-      dockerProject: manifest.composeProject,
+      dockerProject: identity.composeProject,
       mcpUrl,
       namespace,
       ruleFiles: rulesPlan.files.map((file) => file.target),
@@ -179,38 +201,54 @@ export class Installer {
       return { cancelled: true, changed: false, ok: true, plan };
     }
 
-    const compose = this.composeCommand(paths, manifest);
+    const compose = this.composeCommand(paths, identity.composeProject);
+    const composeEnv = this.composeEnvironment(identity);
     try {
       await this.stageManagedFiles(paths, manifest, {
         apiPort,
+        composeProject: identity.composeProject,
         mcpPort,
         openaiApiKey: options.openaiApiKey,
+        redisVolume: identity.redisVolume,
       });
-      await this.runChecked("docker", [...compose, "pull"], "E_IMAGE_PULL", "Docker image pull failed.");
+      await this.runChecked(
+        "docker",
+        [...compose, "pull"],
+        "E_IMAGE_PULL",
+        "Docker image pull failed.",
+        undefined,
+        { env: composeEnv },
+      );
       await this.runChecked(
         "docker",
         [...compose, "up", "--detach", "--wait", "--wait-timeout", "120", "redis"],
         "E_REDIS_START",
         "Redis 8 did not become healthy.",
+        undefined,
+        { env: composeEnv },
       );
       await this.runChecked(
         "docker",
         [...compose, "run", "--rm", "--no-deps", "api", "agent-memory", "migrate-memories"],
         "E_MIGRATION",
         "Memory migration failed.",
+        undefined,
+        { env: composeEnv },
       );
       await this.runChecked(
         "docker",
         [...compose, "up", "--detach", "--wait", "--wait-timeout", "180"],
         "E_STARTUP_TIMEOUT",
         "The Agent Memory containers did not become healthy.",
+        undefined,
+        { env: composeEnv },
       );
       await this.checkApi(apiPort);
     } catch (error) {
       if (!existingState) {
         try {
           const cleanup = await this.system.run("docker", [...compose, "down"], {
-            env: this.system.env,
+            env: composeEnv,
           });
           if (cleanup.code !== 0) {
             this.ui.warn("First-install cleanup failed. Redis data was still preserved.");
@@ -233,13 +271,14 @@ export class Installer {
     const state = {
       agents: structuredClone(savedAgents),
       apiPort,
-      composeProject: manifest.composeProject,
+      composeProject: identity.composeProject,
       installedAt: existingState?.installedAt ?? this.system.now().toISOString(),
       installerVersion: manifest.installerVersion,
       mcpPort,
       mcpUrl,
       phase: "registering-clients",
       projectDir,
+      redisVolume: identity.redisVolume,
       redisImage: manifest.redisImage,
       schemaVersion: 1,
       scope,
@@ -299,7 +338,7 @@ export class Installer {
       state.lastError = error instanceof Error ? error.message : String(error);
       await this.writeState(paths, state);
       if (!existingState) {
-        await this.system.run("docker", [...compose, "stop"], { env: this.system.env });
+        await this.system.run("docker", [...compose, "stop"], { env: composeEnv });
       }
       throw error;
     }
@@ -462,9 +501,10 @@ export class Installer {
     }
 
     const manifest = await this.loadManifest();
-    const compose = this.composeCommand(paths, manifest);
+    const identity = this.runtimeIdentity(state, manifest);
+    const compose = this.composeCommand(paths, identity.composeProject);
     const ps = await this.system.run("docker", [...compose, "ps", "--format", "json"], {
-      env: this.system.env,
+      env: this.composeEnvironment(identity),
     });
     const apiHealthy = await this.isApiHealthy(state.apiPort);
     return {
@@ -670,7 +710,10 @@ export class Installer {
   async start() {
     const { manifest, paths, state } = await this.requireInstall();
     await this.preflightDocker();
-    const compose = this.composeCommand(paths, manifest);
+    const identity = this.runtimeIdentity(state, manifest);
+    await this.assertMemoryVolume(identity.redisVolume);
+    const compose = this.composeCommand(paths, identity.composeProject);
+    const localImage = this.savedLocalImage(state);
     await this.runChecked(
       "docker",
       [...compose, "up", "--detach", "--wait", "--wait-timeout", "180"],
@@ -678,9 +721,9 @@ export class Installer {
       "The Agent Memory containers did not become healthy.",
       undefined,
       {
-        env: state.localSourceImage === LOCAL_SOURCE_IMAGE
-          ? { ...this.system.env, AMS_IMAGE: LOCAL_SOURCE_IMAGE }
-          : this.system.env,
+        env: localImage
+          ? this.composeEnvironment(identity, { AMS_IMAGE: localImage })
+          : this.composeEnvironment(identity),
       },
     );
     await this.checkApi(state.apiPort);
@@ -688,23 +731,32 @@ export class Installer {
   }
 
   async stop() {
-    const { manifest, paths } = await this.requireInstall();
+    const { manifest, paths, state } = await this.requireInstall();
     await this.preflightDocker();
-    const compose = this.composeCommand(paths, manifest);
-    await this.runChecked("docker", [...compose, "stop"], "E_DOCKER", "Docker could not stop the runtime.");
+    const identity = this.runtimeIdentity(state, manifest);
+    const compose = this.composeCommand(paths, identity.composeProject);
+    await this.runChecked(
+      "docker",
+      [...compose, "stop"],
+      "E_DOCKER",
+      "Docker could not stop the runtime.",
+      undefined,
+      { env: this.composeEnvironment(identity) },
+    );
     return { changed: true, dataPreserved: true, ok: true, status: "stopped" };
   }
 
   async logs(options) {
-    const { manifest, paths } = await this.requireInstall();
+    const { manifest, paths, state } = await this.requireInstall();
     await this.preflightDocker();
-    const compose = this.composeCommand(paths, manifest);
+    const identity = this.runtimeIdentity(state, manifest);
+    const compose = this.composeCommand(paths, identity.composeProject);
     const args = [...compose, "logs", "--tail", "200"];
     if (options.follow) {
       args.push("--follow");
     }
     const result = await this.system.run("docker", args, {
-      env: this.system.env,
+      env: this.composeEnvironment(identity),
       stdio: "inherit",
     });
     if (result.code !== 0) {
@@ -729,8 +781,8 @@ export class Installer {
         return installed;
       }
     }
-    const context = await this.localDockerContext();
-    const plan = this.localDockerPlan("install");
+    const context = await this.localDockerContext({ useCurrentImage: true });
+    const plan = this.localDockerPlan("install", context);
     this.printLocalDockerPlan(plan);
     if (options.dryRun) {
       return { changed: false, dryRun: true, ok: true, plan };
@@ -744,7 +796,7 @@ export class Installer {
     return {
       changed: true,
       dataPreserved: true,
-      localImage: LOCAL_SOURCE_IMAGE,
+      localImage: context.image,
       ok: true,
       status: "Docker source install complete",
     };
@@ -752,7 +804,7 @@ export class Installer {
 
   async startLocalDocker(options) {
     const context = await this.localDockerContext();
-    const plan = this.localDockerPlan("up");
+    const plan = this.localDockerPlan("up", context);
     this.printLocalDockerPlan(plan);
     if (options.dryRun) {
       return { changed: false, dryRun: true, ok: true, plan };
@@ -792,7 +844,7 @@ export class Installer {
       );
     }
     const context = await this.localDockerContext();
-    const plan = this.localDockerPlan("restart");
+    const plan = this.localDockerPlan("restart", context);
     this.printLocalDockerPlan(plan);
     if (options.dryRun) {
       return { changed: false, dryRun: true, ok: true, plan };
@@ -834,12 +886,12 @@ export class Installer {
   }
 
   async resetLocalDocker(options) {
-    const context = await this.localDockerContext();
+    const context = await this.localDockerContext({ useCurrentImage: true });
     const plan = {
       appServices: LOCAL_APP_SERVICES,
       dataPreserved: true,
-      image: LOCAL_SOURCE_IMAGE,
-      redisVolume: "umony-agent-memory-redis-data",
+      image: context.image,
+      redisVolume: context.identity.redisVolume,
     };
     this.ui.info("Docker reset plan");
     this.ui.info("  Rebuild the current V0 source");
@@ -888,15 +940,17 @@ export class Installer {
     return {
       changed: true,
       dataPreserved: true,
-      localImage: LOCAL_SOURCE_IMAGE,
+      localImage: context.image,
       ok: true,
       status: "Docker reset complete",
     };
   }
 
-  async localDockerContext() {
+  async localDockerContext(options = {}) {
     const { manifest, paths, state } = await this.requireInstall();
     await this.preflightDocker();
+    const identity = this.runtimeIdentity(state, manifest);
+    await this.assertMemoryVolume(identity.redisVolume);
     for (const required of [paths.compose, paths.runtimeEnv]) {
       if (!(await this.system.lstatSafe(required))) {
         throw new InstallerError(
@@ -914,22 +968,30 @@ export class Installer {
         "Run this command from an agent-memory-server repository checkout.",
       );
     }
+    const image = options.useCurrentImage
+      ? CURRENT_PRODUCT.localImage
+      : this.savedLocalImage(state) ?? CURRENT_PRODUCT.localImage;
     return {
-      compose: this.composeCommand(paths, manifest),
-      env: { ...this.system.env, AMS_IMAGE: LOCAL_SOURCE_IMAGE },
+      compose: this.composeCommand(paths, identity.composeProject),
+      env: {
+        ...this.composeEnvironment(identity),
+        AMS_IMAGE: image,
+      },
+      identity,
+      image,
       paths,
       sourceRoot,
       state,
     };
   }
 
-  localDockerPlan(action) {
+  localDockerPlan(action, context) {
     return {
       action,
       appServices: LOCAL_APP_SERVICES,
       dataPreserved: true,
-      image: LOCAL_SOURCE_IMAGE,
-      redisVolume: "umony-agent-memory-redis-data",
+      image: context.image,
+      redisVolume: context.identity.redisVolume,
     };
   }
 
@@ -949,7 +1011,7 @@ export class Installer {
   async markLocalSourceImage(context) {
     await this.writeState(context.paths, {
       ...context.state,
-      localSourceImage: LOCAL_SOURCE_IMAGE,
+      localSourceImage: context.image,
       updatedAt: this.system.now().toISOString(),
     });
   }
@@ -957,7 +1019,7 @@ export class Installer {
   async assertLocalImage(context) {
     const image = await this.system.run(
       "docker",
-      ["image", "inspect", LOCAL_SOURCE_IMAGE],
+      ["image", "inspect", context.image],
       { env: context.env },
     );
     if (image.code !== 0) {
@@ -970,7 +1032,7 @@ export class Installer {
   }
 
   async buildLocalImage(context) {
-    this.ui.info(`Building ${LOCAL_SOURCE_IMAGE} from the current V0 source.`);
+    this.ui.info(`Building ${context.image} from the current V0 source.`);
     await this.runChecked(
       "docker",
       [
@@ -979,7 +1041,7 @@ export class Installer {
         "--target",
         "standard",
         "--tag",
-        LOCAL_SOURCE_IMAGE,
+        context.image,
         context.sourceRoot,
       ],
       "E_IMAGE_BUILD",
@@ -1127,8 +1189,11 @@ export class Installer {
       }
     }
 
-    const compose = this.composeCommand(paths, manifest);
-    const down = await this.system.run("docker", [...compose, "down"], { env: this.system.env });
+    const identity = this.runtimeIdentity(state, manifest);
+    const compose = this.composeCommand(paths, identity.composeProject);
+    const down = await this.system.run("docker", [...compose, "down"], {
+      env: this.composeEnvironment(identity),
+    });
     if (down.code !== 0) {
       warnings.push("Docker could not remove the stopped containers. The Redis data volume was not touched.");
     }
@@ -1456,9 +1521,14 @@ export class Installer {
   }
 
   paths() {
+    return this.activePaths ?? this.productPaths("Shopapps");
+  }
+
+  productPaths(brand) {
+    const slug = brand.toLowerCase();
     const root = this.system.platform === "darwin"
-      ? path.join(this.system.home, "Library", "Application Support", "Umony", "Agent Memory")
-      : path.join(this.system.home, ".config", "umony-agent-memory");
+      ? path.join(this.system.home, "Library", "Application Support", brand, "Agent Memory")
+      : path.join(this.system.home, ".config", `${slug}-agent-memory`);
     return {
       backups: path.join(root, "backups"),
       canonicalSkill: path.join(root, "skill", "shared-memory"),
@@ -1467,6 +1537,79 @@ export class Installer {
       runtimeEnv: path.join(root, "runtime.env"),
       rulesState: path.join(root, "rules.json"),
       state: path.join(root, "install.json"),
+    };
+  }
+
+  async prepareInstallRoot() {
+    if (!this.pathsReady) {
+      this.pathsReady = this.resolveInstallRoot();
+    }
+    try {
+      this.activePaths = await this.pathsReady;
+    } catch (error) {
+      this.pathsReady = null;
+      throw error;
+    }
+    return this.activePaths;
+  }
+
+  async resolveInstallRoot() {
+    const current = this.productPaths("Shopapps");
+    const legacy = this.productPaths("Umony");
+    const [currentOwned, legacyOwned] = await Promise.all([
+      this.hasOwnedInstallRoot(current),
+      this.hasOwnedInstallRoot(legacy),
+    ]);
+    if (currentOwned && legacyOwned) {
+      throw new InstallerError(
+        "E_INSTALL_PATH_CONFLICT",
+        "Both the Shopapps and older Agent Memory install folders contain managed files.",
+        "Keep both folders unchanged until you have checked which install owns your saved memories.",
+      );
+    }
+    return legacyOwned ? legacy : current;
+  }
+
+  async hasOwnedInstallRoot(paths) {
+    for (const target of [
+      paths.state,
+      paths.rulesState,
+      paths.runtimeEnv,
+      paths.compose,
+      paths.canonicalSkill,
+    ]) {
+      if (await this.system.lstatSafe(target)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  runtimeIdentity(state, manifest) {
+    const composeProject = state?.composeProject
+      ?? (this.paths().root === this.productPaths("Umony").root
+        ? LEGACY_PRODUCT.composeProject
+        : null)
+      ?? manifest.composeProject
+      ?? CURRENT_PRODUCT.composeProject;
+    const redisVolume = state?.redisVolume
+      ?? (composeProject === LEGACY_PRODUCT.composeProject
+        ? LEGACY_PRODUCT.redisVolume
+        : manifest.redisVolume ?? CURRENT_PRODUCT.redisVolume);
+    return { composeProject, redisVolume };
+  }
+
+  savedLocalImage(state) {
+    return LOCAL_SOURCE_IMAGES.has(state?.localSourceImage)
+      ? state.localSourceImage
+      : null;
+  }
+
+  composeEnvironment(identity, overrides = {}) {
+    return {
+      ...this.system.env,
+      AMS_REDIS_VOLUME: identity.redisVolume,
+      ...overrides,
     };
   }
 
@@ -1590,11 +1733,12 @@ export class Installer {
       : "";
     const updates = {
       AMS_API_PORT: String(options.apiPort),
-      AMS_COMPOSE_PROJECT: manifest.composeProject,
+      AMS_COMPOSE_PROJECT: options.composeProject,
       AMS_ENV_FILE: paths.runtimeEnv,
       AMS_IMAGE: manifest.serverImage,
       AMS_MCP_PORT: String(options.mcpPort),
       AMS_REDIS_IMAGE: manifest.redisImage,
+      AMS_REDIS_VOLUME: options.redisVolume,
     };
     if (options.openaiApiKey) {
       updates.OPENAI_API_KEY = options.openaiApiKey;
@@ -1605,11 +1749,11 @@ export class Installer {
     await this.system.writeFileAtomic(paths.runtimeEnv, content, 0o600);
   }
 
-  composeCommand(paths, manifest) {
+  composeCommand(paths, composeProject) {
     return [
       "compose",
       "--project-name",
-      manifest.composeProject,
+      composeProject,
       "--env-file",
       paths.runtimeEnv,
       "--file",
@@ -1641,6 +1785,21 @@ export class Installer {
       throw new InstallerError(code, message, hint ?? bounded(result.stderr || result.stdout));
     }
     return result;
+  }
+
+  async assertMemoryVolume(redisVolume) {
+    const result = await this.system.run(
+      "docker",
+      ["volume", "inspect", redisVolume],
+      { env: this.system.env },
+    );
+    if (result.code !== 0) {
+      throw new InstallerError(
+        "E_MEMORY_VOLUME_MISSING",
+        `The saved memory volume is missing: ${redisVolume}.`,
+        "The installer stopped before changing Docker. Check Docker Desktop and the saved install settings.",
+      );
+    }
   }
 
   async checkApi(port) {

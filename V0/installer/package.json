@@ -1,5 +1,5 @@
 {
-  "name": "@umony/agent-memory",
+  "name": "@shopapps/agent-memory",
   "version": "0.1.0",
   "description": "One-command macOS installer for the local Agent Memory runtime, Skill, and MCP clients.",
   "type": "module",

@@ -100,6 +100,35 @@ test("appends and updates only the managed block", async () => {
   assert.equal(await readFile(target, "utf8"), updated);
 });
 
+test("updates one legacy rules block to Shopapps markers", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-memory-rule-brand-"));
+  const target = path.join(root, "AGENTS.md");
+  const system = createSystem({ cwd: root, home: root });
+  const legacy = [
+    "# Keep this",
+    "",
+    "<!-- >>> @umony/agent-memory shared-memory rules >>> -->",
+    "## Shared memory",
+    "",
+    "Old rule text.",
+    "<!-- <<< @umony/agent-memory shared-memory rules <<< -->",
+    "",
+  ].join("\n");
+  await system.writeFileAtomic(target, legacy);
+
+  const result = await upsertRulesFile(system, target, RULES_BODY, {
+    namespace: "shopapps/acr",
+    scope: "project",
+  });
+  const updated = await readFile(target, "utf8");
+
+  assert.equal(result.changed, true);
+  assert.match(updated, /# Keep this/);
+  assert.match(updated, /@shopapps\/agent-memory shared-memory rules/);
+  assert.doesNotMatch(updated, /@umony\/agent-memory shared-memory rules/);
+  assert.equal((updated.match(/shared-memory rules >>>/g) ?? []).length, 1);
+});
+
 test("stops on broken or duplicate markers without changing the file", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "agent-memory-rule-conflict-"));
   const target = path.join(root, "CLAUDE.md");

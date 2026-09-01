@@ -37,10 +37,41 @@ test("adds a marked Codex project block without replacing existing TOML", async 
   assert.equal(result.created, true);
   const content = await readFile(configPath, "utf8");
   assert.match(content, /model = "gpt-5"/);
-  assert.match(content, /Managed|@umony\/agent-memory/);
+  assert.match(content, /Managed|@shopapps\/agent-memory/);
   assert.match(content, /http:\/\/127\.0\.0\.1:9050\/mcp/);
   assert.equal((await inspectMcp(system, "codex", options)).status, "matching");
   assert.equal((await stat(configPath)).mode & 0o777, 0o644);
+});
+
+test("updates a legacy Codex project MCP marker without adding a second block", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-memory-codex-brand-"));
+  const configPath = path.join(root, ".codex", "config.toml");
+  const system = createSystem({ cwd: root, home: root, platform: "darwin" });
+  await system.writeFileAtomic(
+    configPath,
+    [
+      "model = \"gpt-5\"",
+      "# >>> @umony/agent-memory shared-memory >>>",
+      "[mcp_servers.shared-memory]",
+      "url = \"http://127.0.0.1:9050/mcp\"",
+      "# <<< @umony/agent-memory shared-memory <<<",
+      "",
+    ].join("\n"),
+  );
+  const options = {
+    name: "shared-memory",
+    projectDir: root,
+    scope: "project",
+    url: "http://127.0.0.1:9050/mcp",
+  };
+
+  const result = await installMcp(system, "codex", options);
+  const updated = await readFile(configPath, "utf8");
+
+  assert.equal(result.created, false);
+  assert.match(updated, /@shopapps\/agent-memory shared-memory/);
+  assert.doesNotMatch(updated, /@umony\/agent-memory shared-memory/);
+  assert.equal((updated.match(/mcp_servers\.shared-memory/g) ?? []).length, 1);
 });
 
 test("finds a foreign Codex project MCP section before another section", async () => {

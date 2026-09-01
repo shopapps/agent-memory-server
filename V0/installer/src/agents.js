@@ -2,8 +2,14 @@ import path from "node:path";
 
 import { InstallerError } from "./errors.js";
 
-const CODEX_BLOCK_START = "# >>> @umony/agent-memory shared-memory >>>";
-const CODEX_BLOCK_END = "# <<< @umony/agent-memory shared-memory <<<";
+const CODEX_BLOCK_START = "# >>> @shopapps/agent-memory shared-memory >>>";
+const CODEX_BLOCK_END = "# <<< @shopapps/agent-memory shared-memory <<<";
+const LEGACY_CODEX_BLOCK_START = "# >>> @umony/agent-memory shared-memory >>>";
+const LEGACY_CODEX_BLOCK_END = "# <<< @umony/agent-memory shared-memory <<<";
+const CODEX_MARKER_PAIRS = [
+  { end: CODEX_BLOCK_END, legacy: false, start: CODEX_BLOCK_START },
+  { end: LEGACY_CODEX_BLOCK_END, legacy: true, start: LEGACY_CODEX_BLOCK_START },
+];
 
 export async function detectAgents(system) {
   const detected = [];
@@ -136,6 +142,9 @@ export async function installMcp(system, agent, options) {
     );
   }
   if (inspection.status === "matching") {
+    if (agent === "codex" && options.scope === "project" && inspection.legacy) {
+      await installCodexProject(system, options);
+    }
     return { created: false, url: options.url };
   }
 
@@ -201,9 +210,10 @@ async function inspectCodexProject(system, options) {
   const content = await system.readFile(configPath, "utf8");
   const managed = managedCodexBlock(content);
   if (managed) {
-    const url = findUrlInToml(managed);
+    const url = findUrlInToml(managed.content);
     return {
       configPath,
+      legacy: managed.legacy,
       status: url === options.url ? "matching" : "conflict",
       url,
     };
@@ -225,7 +235,6 @@ async function installCodexProject(system, options) {
   const configPath = path.join(options.projectDir, ".codex", "config.toml");
   const existingStat = await system.lstatSafe(configPath);
   const existing = existingStat ? await system.readFile(configPath, "utf8") : "";
-  const separator = existing && !existing.endsWith("\n") ? "\n" : "";
   const block = [
     CODEX_BLOCK_START,
     `[mcp_servers.${options.name}]`,
@@ -233,9 +242,14 @@ async function installCodexProject(system, options) {
     CODEX_BLOCK_END,
     "",
   ].join("\n");
+  const managed = managedCodexBlock(existing);
+  const separator = existing && !existing.endsWith("\n") ? "\n" : "";
+  const updated = managed
+    ? existing.slice(0, managed.start) + block + existing.slice(managed.end)
+    : existing + separator + block;
   await system.writeFileAtomic(
     configPath,
-    existing + separator + block,
+    updated,
     existingStat ? existingStat.mode & 0o777 : 0o644,
   );
 }
@@ -251,18 +265,56 @@ async function removeCodexProject(system, options) {
   if (!managed) {
     return false;
   }
-  const updated = existing.replace(managed, "").replace(/\n{3,}/g, "\n\n");
+  const updated = (
+    existing.slice(0, managed.start) + existing.slice(managed.end)
+  ).replace(/\n{3,}/g, "\n\n");
   await system.writeFileAtomic(configPath, updated, existingStat.mode & 0o777);
   return true;
 }
 
 function managedCodexBlock(content) {
-  const start = content.indexOf(CODEX_BLOCK_START);
-  const end = content.indexOf(CODEX_BLOCK_END);
-  if (start < 0 || end < start) {
+  const found = [];
+  for (const pair of CODEX_MARKER_PAIRS) {
+    const starts = countOccurrences(content, pair.start);
+    const ends = countOccurrences(content, pair.end);
+    if (starts === 0 && ends === 0) {
+      continue;
+    }
+    const start = content.indexOf(pair.start);
+    const endMarkerStart = content.indexOf(pair.end);
+    if (starts !== 1 || ends !== 1 || start < 0 || endMarkerStart < start) {
+      throw new InstallerError(
+        "E_MCP_CONFLICT",
+        "The installer-owned Codex MCP markers are missing, repeated, or out of order.",
+      );
+    }
+    let end = endMarkerStart + pair.end.length;
+    if (content[end] === "\r" && content[end + 1] === "\n") {
+      end += 2;
+    } else if (content[end] === "\n") {
+      end += 1;
+    }
+    found.push({
+      content: content.slice(start, end),
+      end,
+      legacy: pair.legacy,
+      start,
+    });
+  }
+  if (found.length === 0) {
     return null;
   }
-  return content.slice(start, end + CODEX_BLOCK_END.length + 1);
+  if (found.length !== 1) {
+    throw new InstallerError(
+      "E_MCP_CONFLICT",
+      "More than one installer-owned Codex MCP block was found.",
+    );
+  }
+  return found[0];
+}
+
+function countOccurrences(content, value) {
+  return content.split(value).length - 1;
 }
 
 function findUrl(value) {

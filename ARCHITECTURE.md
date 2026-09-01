@@ -135,8 +135,8 @@ record type. A target record looks like this:
   "memory_type": "semantic",
   "kind": "decision",
 
-  "namespace": "coding/umony/archive",
-  "project_id": "umony/archive-content-relay",
+  "namespace": "coding/shopapps/archive",
+  "project_id": "shopapps/archive-content-relay",
   "user_id": "paul",
   "agent_id": null,
   "session_id": null,
@@ -228,8 +228,8 @@ A namespace describes the subject area. It is a slash-separated path:
 ```text
 coding
 coding/laravel
-coding/umony
-coding/umony/archive
+coding/shopapps
+coding/shopapps/archive
 dnd/5e/2024
 dnd/campaigns/phandelver
 ```
@@ -247,11 +247,11 @@ Rules:
 - `cross_namespace=false` by default. Sideways search requires an explicit list
   of allowed namespaces.
 
-For `coding/umony/archive`, parent inheritance may read:
+For `coding/shopapps/archive`, parent inheritance may read:
 
 ```text
-coding/umony/archive
-coding/umony
+coding/shopapps/archive
+coding/shopapps
 coding
 ```
 
@@ -265,7 +265,7 @@ for safe parent inheritance.
 Scopes answer who and what a memory belongs to:
 
 - `project_id`: project or repo family, for example
-  `umony/archive-content-relay`.
+  `shopapps/archive-content-relay`.
 - `user_id`: user-owned knowledge.
 - `agent_id`: knowledge private to or written for one agent.
 - `session_id`: one run or conversation.
@@ -590,8 +590,8 @@ budget.
 
 ```json
 {
-  "namespace": "coding/umony/archive",
-  "project_id": "umony/archive-content-relay",
+  "namespace": "coding/shopapps/archive",
+  "project_id": "shopapps/archive-content-relay",
   "inherit_parents": true,
   "max_tokens": 300
 }
@@ -604,8 +604,8 @@ Search current memory with safe scope defaults.
 ```json
 {
   "query": "How do archive jobs use RabbitMQ?",
-  "namespace": "coding/umony/archive",
-  "project_id": "umony/archive-content-relay",
+  "namespace": "coding/shopapps/archive",
+  "project_id": "shopapps/archive-content-relay",
   "agent_id": "codex",
   "inherit_parents": true,
   "search_mode": "hybrid",

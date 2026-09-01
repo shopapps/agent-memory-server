@@ -100,4 +100,4 @@ services:
 
 volumes:
   redis-data:
-    name: umony-agent-memory-redis-data
+    name: "${AMS_REDIS_VOLUME:?AMS_REDIS_VOLUME is required}"

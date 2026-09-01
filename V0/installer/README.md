@@ -11,7 +11,7 @@ From the root of this repository, run:
 
 The longer `npx --yes ./V0/installer docker:install` form remains supported.
 
-Do not use `npx @umony/agent-memory@latest`; npm will return `404 Not Found`.
+Do not use `npx @shopapps/agent-memory@latest`; npm will return `404 Not Found`.
 
 It needs Node.js 20 or newer, Docker Desktop with Docker Compose, internet
 access, and Codex or Claude Code on the command path. Docker Desktop must be
@@ -62,7 +62,7 @@ npx --yes ./V0/installer rules update \
   --agents all \
   --scope project \
   --project-dir "/path/to/your/project" \
-  --namespace umony/acr \
+  --namespace shopapps/acr \
   --yes
 ```
 
@@ -97,8 +97,12 @@ the normal first install when needed, then builds and runs the current `V0/`
 source through the managed Compose setup.
 After changing the source code, `./ams docker:reset` rebuilds it and recreates
 the managed containers. Reset never passes a volume-removal flag, so the
-`umony-agent-memory-redis-data` memory database is kept. `--force` skips only
+`shopapps-agent-memory-redis-data` memory database is kept. `--force` skips only
 the reset question.
+
+Older installs keep their original internal folder, Docker project, and volume
+names. This keeps their existing memory volume attached. A later source rebuild
+changes only the local image tag. Fresh installs use Shopapps names.
 
 See the main [install guide](../../INSTALL.md#use-shared-memory-in-agent-tasks)
 for simple save, recall, automatic-use, and Codex test examples.
@@ -114,7 +118,7 @@ agent-memory --help
 ```
 
 This links the command to your local checkout. Remove it with
-`npm unlink --global @umony/agent-memory`. This is optional. It adds a global
+`npm unlink --global @shopapps/agent-memory`. This is optional. It adds a global
 command and may clash with the Python server command, which is also named
 `agent-memory`. The local `npx` path is safer.
 
@@ -140,4 +144,4 @@ node bin/agent-memory.js --help
 The release manifest pins exact Docker image digests. If the team later decides
 to publish the npm package, publish a matching server image first, update that
 manifest, and run all checks. Only then will
-`npx --yes @umony/agent-memory@latest` work.
+`npx --yes @shopapps/agent-memory@latest` work.
