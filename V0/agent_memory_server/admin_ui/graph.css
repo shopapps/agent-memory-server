@@ -564,7 +564,31 @@ canvas:focus-visible {
   border-radius: 5px;
   background: var(--surface);
   color: #b8c3d3;
+  font-family: inherit;
   font-size: 11px;
+  line-height: 1.2;
+}
+
+.tag-link {
+  cursor: pointer;
+}
+
+.tag-link:hover,
+.tag-link:focus-visible {
+  border-color: var(--memory);
+  outline: none;
+  background: #0d1d33;
+  color: #e8f1ff;
+}
+
+.tag-link.topic:hover,
+.tag-link.topic:focus-visible {
+  border-color: var(--topic);
+}
+
+.tag-link.entity:hover,
+.tag-link.entity:focus-visible {
+  border-color: var(--entity);
 }
 
 .connected-memory-list {

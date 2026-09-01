@@ -147,7 +147,8 @@ memory's search embedding, so it may use a small amount of credit from the
 configured embedding provider.
 
 Project, namespace, topic, and entity panels list their connected memories.
-Click a listed memory to open it. Larger nodes have more links or more memory
+Click a listed memory to open it. Topic and Entity tags in a memory panel also
+jump to the matching graph node. Larger nodes have more links or more memory
 text, and each node has a coloured halo so groups are easier to see.
 
 The memory panel also has **Delete**. It asks again before deleting and removes

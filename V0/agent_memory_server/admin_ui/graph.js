@@ -513,7 +513,28 @@ function detailBlock(label, value, className = "") {
   return block;
 }
 
-function tagBlock(label, values) {
+function revealNodeKind(kind) {
+  state.visibleKinds.add(kind);
+  const toggle = kindToggles.find((item) => item.dataset.kind === kind);
+  toggle?.setAttribute("aria-pressed", "true");
+}
+
+function focusGraphNode(node) {
+  revealNodeKind(node.kind);
+  selectNode(node);
+  state.autoFit = false;
+
+  const scale = Math.max(0.85, Math.min(1.35, state.camera.scale));
+  const inspectorBounds = inspector.getBoundingClientRect();
+  const inspectorIsBelow = window.matchMedia("(max-width: 760px)").matches;
+  state.camera = {
+    x: -node.x * scale,
+    y: -node.y * scale - (inspectorIsBelow ? inspectorBounds.height / 2 : 0),
+    scale,
+  };
+}
+
+function tagBlock(label, values, nodeKind) {
   if (!values?.length) return null;
   const block = document.createElement("section");
   block.className = "detail-block";
@@ -523,9 +544,18 @@ function tagBlock(label, values) {
   const tags = document.createElement("div");
   tags.className = "tag-list";
   for (const value of values) {
-    const tag = document.createElement("span");
+    const relatedNode = state.nodes.find(
+      (node) => node.kind === nodeKind && node.value === value,
+    );
+    const tag = document.createElement(relatedNode ? "button" : "span");
     tag.className = "tag";
     tag.textContent = value;
+    if (relatedNode) {
+      tag.type = "button";
+      tag.classList.add("tag-link", nodeKind);
+      tag.setAttribute("aria-label", `Open ${nodeKind}: ${value}`);
+      tag.addEventListener("click", () => focusGraphNode(relatedNode));
+    }
     tags.append(tag);
   }
   block.append(heading, tags);
@@ -689,8 +719,8 @@ function renderInspectorDetails(node) {
       detailBlock("Created", formatDate(memory.created_at)),
       detailBlock("Updated", formatDate(memory.updated_at)),
       detailBlock("Last used", formatDate(memory.last_accessed)),
-      tagBlock("Topics", memory.topics),
-      tagBlock("Entities", memory.entities),
+      tagBlock("Topics", memory.topics, "topic"),
+      tagBlock("Entities", memory.entities, "entity"),
       detailBlock("Memory ID", memory.id),
     ].filter(Boolean);
     inspectorBody.append(...blocks);

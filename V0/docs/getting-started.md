@@ -59,7 +59,8 @@ After the API starts, open
 The page can filter by project, namespace, memory type, and agent. Drag to move
 around, scroll to zoom, and click a node to read or edit the full memory.
 Project, namespace, topic, and entity details include links to the memories
-connected to that node. Larger nodes have more links or longer memory text.
+connected to that node. Topic and Entity tags in a memory panel jump to the
+matching node. Larger nodes have more links or longer memory text.
 Coloured halos make node groups easier to see.
 Browsing uses filter and keyword searches only, so it does not call an AI
 model. Saving an edit rebuilds the memory's search embedding and may use the

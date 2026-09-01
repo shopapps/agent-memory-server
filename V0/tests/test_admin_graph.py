@@ -263,6 +263,10 @@ async def test_graph_page_and_assets_are_packaged(client):
     assert 'method: "PATCH"' in script.text
     assert "/v1/long-term-memory/" in script.text
     assert "connectedMemoryNodes" in script.text
+    assert 'tagBlock("Topics", memory.topics, "topic")' in script.text
+    assert 'tagBlock("Entities", memory.entities, "entity")' in script.text
+    assert "focusGraphNode" in script.text
+    assert ".tag-link" in styles.text
     assert "connectionCount" in script.text
     assert "createRadialGradient" in script.text
     assert 'method: "DELETE"' in script.text
