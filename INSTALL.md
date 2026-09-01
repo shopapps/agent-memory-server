@@ -132,11 +132,39 @@ OpenAI API use is billed separately from a ChatGPT Plus or Pro plan. See
 
 After the installer finishes, open:
 
+- Memory graph: [http://127.0.0.1:8000/admin/memories/graph](http://127.0.0.1:8000/admin/memories/graph)
 - API docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - Health check: [http://127.0.0.1:8000/v1/health](http://127.0.0.1:8000/v1/health)
 
 The REST API starts at `http://127.0.0.1:8000`. The MCP link used by Codex and
 Claude starts at `http://127.0.0.1:9050/mcp`.
+
+The memory graph is a human view. Use the project tabs and namespace list to
+narrow the view. Drag the background to move, scroll to zoom, move a node with
+the mouse, and click a node to read or edit its details. Opening, searching,
+and filtering the graph do not call OpenAI. Saving an edit rebuilds that
+memory's search embedding, so it may use a small amount of credit from the
+configured embedding provider.
+
+Project, namespace, topic, and entity panels list their connected memories.
+Click a listed memory to open it. Larger nodes have more links or more memory
+text, and each node has a coloured halo so groups are easier to see.
+
+The memory panel also has **Delete**. It asks again before deleting and removes
+only that memory. Deletion is permanent. A pinned memory can still be deleted
+by hand, and deleting does not use OpenAI credits. Only give graph access to
+people you trust with the memory REST API.
+
+New memories use their project ID for the project tabs. For older memories
+without one, the graph uses the leading `owner/project` part of the namespace,
+then shows any remaining path as namespace filters.
+
+The built-in graph is for the local Mac quickstart. That setup turns local
+authentication off and binds the page to this Mac only. Do not expose that
+setup to a network. When API authentication is enabled, the graph page also
+requires authentication and does not include its own sign-in screen. A shared
+deployment needs a trusted web proxy or another browser login layer that sends
+the supported bearer token.
 
 If you chose different ports, use those port numbers instead. You can also run
 the local `status` or `doctor` commands below to check the install.

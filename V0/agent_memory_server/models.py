@@ -768,6 +768,65 @@ class MemoryRecordResultsResponse(MemoryRecordResults):
     """Response containing memory search results"""
 
 
+class MemoryGraphNode(BaseModel):
+    """One item shown in the human memory graph."""
+
+    id: str
+    kind: Literal["memory", "project", "namespace", "topic", "entity"]
+    label: str
+    value: str | None = None
+    count: int = Field(default=1, ge=1)
+    project_id: str | None = None
+    project_label: str | None = None
+    memory: MemoryRecord | None = None
+
+
+class MemoryGraphEdge(BaseModel):
+    """One checked relationship shown in the human memory graph."""
+
+    id: str
+    source: str
+    target: str
+    kind: Literal[
+        "belongs_to",
+        "inside",
+        "tagged",
+        "mentions",
+        "derived_from",
+    ]
+
+
+class MemoryGraphFacet(BaseModel):
+    """One filter choice and the number of matching memories."""
+
+    value: str
+    label: str
+    count: int = Field(ge=1)
+    field: Literal["project_id", "namespace", "memory_type", "agent_id"] | None = None
+    separator: Literal["/", "."] | None = None
+
+
+class MemoryGraphFacets(BaseModel):
+    """Filter choices shown above the memory graph."""
+
+    projects: list[MemoryGraphFacet] = Field(default_factory=list)
+    namespaces: list[MemoryGraphFacet] = Field(default_factory=list)
+    memory_types: list[MemoryGraphFacet] = Field(default_factory=list)
+    agents: list[MemoryGraphFacet] = Field(default_factory=list)
+
+
+class MemoryGraphResponse(BaseModel):
+    """Ready-to-draw graph data for the human memory browser."""
+
+    nodes: list[MemoryGraphNode]
+    edges: list[MemoryGraphEdge]
+    facets: MemoryGraphFacets
+    memory_count: int = Field(ge=0)
+    result_limit: int = Field(ge=1)
+    truncated: bool = False
+    facets_truncated: bool = False
+
+
 class CreateMemoryRecordRequest(BaseModel):
     """Payload for creating memory records"""
 
@@ -1134,6 +1193,13 @@ class EditMemoryRecordRequest(BaseModel):
         default=None,
         description="Whether this memory is pinned and should not be auto-deleted",
     )
+
+    @field_validator("text", mode="after")
+    @classmethod
+    def reject_blank_text(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("Memory text cannot be empty")
+        return value
 
     @field_validator("topics", "entities", mode="after")
     @classmethod

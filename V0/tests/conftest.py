@@ -15,6 +15,7 @@ from httpx import ASGITransport, AsyncClient
 from redis.asyncio import Redis as AsyncRedis
 from testcontainers.compose import DockerCompose
 
+from agent_memory_server.admin_graph import router as admin_graph_router
 from agent_memory_server.api import router as memory_router
 from agent_memory_server.config import settings
 from agent_memory_server.dependencies import HybridBackgroundTasks
@@ -509,6 +510,7 @@ def app(use_test_redis_connection):
     # Include routers
     app.include_router(health_router)
     app.include_router(memory_router)
+    app.include_router(admin_graph_router)
 
     return app
 
@@ -521,6 +523,7 @@ def app_with_mock_background_tasks(use_test_redis_connection):
     # Include routers
     app.include_router(health_router)
     app.include_router(memory_router)
+    app.include_router(admin_graph_router)
 
     # Override the get_redis_conn function to return the test Redis connection
     async def mock_get_redis_conn(*args, **kwargs):

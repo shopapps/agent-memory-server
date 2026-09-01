@@ -45,6 +45,14 @@ The installer is not published to npm.
 After the server starts, open the local API docs at
 [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
+Review memories in the human graph at
+[http://127.0.0.1:8000/admin/memories/graph](http://127.0.0.1:8000/admin/memories/graph).
+The graph supports project and namespace filters, mouse pan and zoom, movable
+nodes, connected-memory links, size and halo clues, and click-to-read or edit
+details. Browsing does not call an AI model. Saving an edit may use the
+configured embedding provider. Deletion asks for confirmation, is permanent,
+and does not use an AI model.
+
 ### 1. Installation
 
 #### Using Docker

@@ -1668,6 +1668,27 @@ class TestLongTermMemoryScopeEdits:
         mock_update.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_patch_long_term_memory_rejects_blank_text(client):
+    mock_settings = Settings(long_term_memory=True)
+
+    with (
+        patch("agent_memory_server.api.settings", mock_settings),
+        patch(
+            "agent_memory_server.api.long_term_memory.update_long_term_memory",
+            new=AsyncMock(),
+        ) as mock_update,
+    ):
+        response = await client.patch(
+            "/v1/long-term-memory/memory-1",
+            json={"text": "   "},
+        )
+
+    assert response.status_code == 422
+    assert "Memory text cannot be empty" in response.text
+    mock_update.assert_not_awaited()
+
+
 class TestDeprecationHeader:
     """Tests for X-Deprecation-Warning header on working memory endpoints"""
 

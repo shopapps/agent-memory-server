@@ -85,6 +85,16 @@ Your server is now running at `http://localhost:8000`!
 
 Check the API docs at: `http://localhost:8000/docs`
 
+Review stored memories at:
+`http://localhost:8000/admin/memories/graph`
+
+The graph supports project and namespace filters, mouse pan and zoom, movable
+nodes, connected-memory links, size and halo clues, and click-to-read or edit
+memory details. Browsing reads existing Redis data without calling an AI model.
+Saving an edit rebuilds its search embedding and may use the configured
+embedding provider. Deletion asks for confirmation, is permanent, can remove a
+pinned memory, leaves related memories alone, and does not use AI credits.
+
 ## Step 5: Your First Memory-Enhanced App
 
 Now let's build a memory-enhanced chat application using the Python SDK:

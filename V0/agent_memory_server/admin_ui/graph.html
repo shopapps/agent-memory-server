@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Memory Graph</title>
+    <link rel="stylesheet" href="/admin/memories/graph/graph.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="app-header">
+        <h1>Memory Graph</h1>
+        <p id="load-status" class="load-status" role="status">Loading memories…</p>
+      </header>
+
+      <nav id="project-tabs" class="project-tabs" aria-label="Projects"></nav>
+
+      <section class="toolbar" aria-label="Graph filters">
+        <label class="search-control">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="6.5"></circle>
+            <path d="m16 16 4 4"></path>
+          </svg>
+          <span class="sr-only">Search memories</span>
+          <input id="search-input" type="search" placeholder="Search memories" />
+        </label>
+
+        <label class="select-control">
+          <span class="sr-only">Namespace</span>
+          <select id="namespace-filter">
+            <option value="">All namespaces</option>
+          </select>
+        </label>
+
+        <label class="select-control compact-select">
+          <span class="sr-only">Memory type</span>
+          <select id="type-filter">
+            <option value="">All types</option>
+          </select>
+        </label>
+
+        <label class="select-control compact-select">
+          <span class="sr-only">Agent</span>
+          <select id="agent-filter">
+            <option value="">All agents</option>
+          </select>
+        </label>
+
+        <div class="graph-kind-controls" aria-label="Visible node types">
+          <button type="button" class="kind-toggle" data-kind="project" aria-pressed="true">
+            <span class="kind-dot project"></span>Project
+          </button>
+          <button type="button" class="kind-toggle" data-kind="namespace" aria-pressed="true">
+            <span class="kind-dot namespace"></span>Namespace
+          </button>
+          <button type="button" class="kind-toggle" data-kind="topic" aria-pressed="true">
+            <span class="kind-dot topic"></span>Topic
+          </button>
+          <button type="button" class="kind-toggle" data-kind="entity" aria-pressed="true">
+            <span class="kind-dot entity"></span>Entity
+          </button>
+        </div>
+
+        <button id="reset-view" type="button" class="reset-button">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 11a8 8 0 0 0-14.5-4.7L3 9"></path>
+            <path d="M3 4v5h5"></path>
+            <path d="M4 13a8 8 0 0 0 14.5 4.7L21 15"></path>
+            <path d="M21 20v-5h-5"></path>
+          </svg>
+          Reset view
+        </button>
+      </section>
+
+      <section class="workspace">
+        <div id="graph-stage" class="graph-stage">
+          <canvas
+            id="memory-graph"
+            aria-label="Interactive memory graph. Drag to move around, use the mouse wheel to zoom, and click a node to inspect it."
+          ></canvas>
+          <div class="canvas-help">Drag to move · Scroll to zoom · Click to inspect</div>
+          <div id="empty-state" class="empty-state" hidden>
+            <strong>No memories found</strong>
+            <span>Try another project, namespace, or search.</span>
+          </div>
+        </div>
+
+        <aside id="inspector" class="inspector" aria-label="Selected node" aria-hidden="true">
+          <div class="inspector-header">
+            <div>
+              <span id="inspector-kind" class="inspector-kind">Memory</span>
+              <h2 id="inspector-title">Select a memory</h2>
+            </div>
+            <div class="inspector-actions">
+              <button id="edit-memory" type="button" class="edit-button" hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m4 20 4.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20Z"></path>
+                  <path d="m13.5 7.5 3 3"></path>
+                </svg>
+                Edit
+              </button>
+              <button id="delete-memory" type="button" class="delete-button" hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 7h16"></path>
+                  <path d="m9 7 1-3h4l1 3"></path>
+                  <path d="m6 7 1 13h10l1-13"></path>
+                  <path d="M10 11v5M14 11v5"></path>
+                </svg>
+                Delete
+              </button>
+              <button
+                id="close-inspector"
+                type="button"
+                class="icon-button"
+                aria-label="Close details"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m6 6 12 12M18 6 6 18"></path>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div id="inspector-body" class="inspector-body"></div>
+        </aside>
+      </section>
+
+      <div id="page-notice" class="page-notice" role="status" aria-live="polite" hidden></div>
+    </main>
+
+    <script type="module" src="/admin/memories/graph/graph.js"></script>
+  </body>
+</html>
