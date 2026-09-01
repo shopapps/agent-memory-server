@@ -73,7 +73,13 @@ test("rules uninstall never prompts for or detects agents", async () => {
   assert.equal(options.scope, null);
 });
 
-for (const command of ["install", "rules-install", "rules-uninstall", "rules-update"]) {
+for (const command of [
+  "docker:install",
+  "install",
+  "rules-install",
+  "rules-uninstall",
+  "rules-update",
+]) {
   test(`${command} treats --project-dir as project scope`, async () => {
     const options = {
       agents: ["codex"],

@@ -37,9 +37,14 @@ For a guided Mac setup that starts Docker and connects Codex or Claude, see the
 From the repository root, the current local command is:
 
 ```bash
-npx --yes ./V0/installer
+./ams docker:install
 ```
 
+Use `./ams docker:install` to build this checkout and replace the managed app
+containers without deleting the Redis memory database. See the
+[local install guide](../INSTALL.md#run-the-current-source-in-docker) for the
+safe reset, start, and restart commands.
+`npx --yes ./V0/installer docker:install` remains available as a fallback.
 The installer is not published to npm.
 
 After the server starts, open the local API docs at

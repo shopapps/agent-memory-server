@@ -81,3 +81,47 @@ test("allows help for the rules command group", () => {
   const parsed = parseArgs(["rules", "--help"]);
   assert.equal(parsed.options.help, true);
 });
+
+test("parses the local Docker helper commands", () => {
+  assert.equal(parseArgs(["docker:install"]).command, "docker:install");
+  assert.equal(parseArgs(["docker:up"]).command, "docker:up");
+
+  const restart = parseArgs(["docker:restart", "app"]);
+  assert.equal(restart.command, "docker:restart");
+  assert.equal(restart.options.dockerTarget, "app");
+
+  const reset = parseArgs(["docker:reset", "--force"]);
+  assert.equal(reset.command, "docker:reset");
+  assert.equal(reset.options.force, true);
+});
+
+test("rejects a missing or unsupported Docker restart target", () => {
+  assert.throws(() => parseArgs(["docker:restart"]), { code: "E_BAD_OPTION" });
+  assert.throws(() => parseArgs(["docker:restart", "database"]), {
+    code: "E_BAD_OPTION",
+  });
+});
+
+test("allows Docker restart help without a target", () => {
+  const parsed = parseArgs(["docker:restart", "--help"]);
+
+  assert.equal(parsed.command, "docker:restart");
+  assert.equal(parsed.options.dockerTarget, null);
+  assert.equal(parsed.options.help, true);
+});
+
+test("reset uses --force rather than the install --yes flag", () => {
+  assert.throws(() => parseArgs(["docker:reset", "--yes"]), {
+    code: "E_BAD_OPTION",
+  });
+});
+
+test("Docker lifecycle commands reject install-only flags", () => {
+  assert.throws(() => parseArgs(["docker:up", "--api-port", "8010"]), {
+    code: "E_BAD_OPTION",
+  });
+  assert.throws(
+    () => parseArgs(["docker:restart", "app", "--agents", "codex"]),
+    { code: "E_BAD_OPTION" },
+  );
+});

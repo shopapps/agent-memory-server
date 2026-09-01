@@ -6,8 +6,10 @@ connect it to Codex or Claude Code. It is not published to npm.
 From the root of this repository, run:
 
 ```bash
-npx --yes ./V0/installer
+./ams docker:install
 ```
+
+The longer `npx --yes ./V0/installer docker:install` form remains supported.
 
 Do not use `npx @umony/agent-memory@latest`; npm will return `404 Not Found`.
 
@@ -32,7 +34,8 @@ your saved memories:
 read -s "OPENAI_API_KEY?OpenAI API key: "
 echo
 export OPENAI_API_KEY
-npx --yes ./V0/installer install --yes
+./ams install --yes
+./ams docker:install
 unset OPENAI_API_KEY
 ```
 
@@ -67,6 +70,10 @@ The available commands are:
 
 ```text
 agent-memory install
+agent-memory docker:install
+agent-memory docker:up
+agent-memory docker:restart app
+agent-memory docker:reset [--force]
 agent-memory rules install
 agent-memory rules update
 agent-memory rules uninstall
@@ -84,6 +91,14 @@ and secrets.
 
 Normal `install` and `update` also install or refresh the rules. The rules-only
 commands do not touch Docker, MCP, the Skill, or saved memories.
+
+The `docker:` commands are for a repository checkout. `docker:install` runs
+the normal first install when needed, then builds and runs the current `V0/`
+source through the managed Compose setup.
+After changing the source code, `./ams docker:reset` rebuilds it and recreates
+the managed containers. Reset never passes a volume-removal flag, so the
+`umony-agent-memory-redis-data` memory database is kept. `--force` skips only
+the reset question.
 
 ## Optional local command
 

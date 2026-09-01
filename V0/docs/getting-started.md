@@ -24,6 +24,12 @@ uv sync
 
 The easiest way to start the worker, REST API server, and MCP server is to use Docker Compose. See the Docker Compose section below for more details.
 
+For the managed Mac setup, run `./ams docker:install` from the repository root.
+It runs the first setup when needed, builds the current source, and replaces
+the app containers while keeping the Redis memory database. The safe start,
+restart, and reset commands are listed in the
+[local install guide](../../INSTALL.md#run-the-current-source-in-docker).
+
 But you can also run these components via the CLI commands. Here's how you
 run the REST API server:
 

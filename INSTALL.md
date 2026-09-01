@@ -16,13 +16,20 @@ The installer package is kept in this repository. It is not published to npm.
 If you already have this repository, run this from its root:
 
 ```bash
-npx --yes ./V0/installer
+./ams docker:install
 ```
 
 For a new Mac, this single line clones the repository and runs the installer:
 
 ```bash
-git clone https://github.com/shopapps/agent-memory-server.git && cd agent-memory-server && npx --yes ./V0/installer
+git clone https://github.com/shopapps/agent-memory-server.git && cd agent-memory-server && ./ams docker:install
+```
+
+The Bash helper above runs the installer kept in this repository. This longer
+form does the same thing and remains supported:
+
+```bash
+npx --yes ./V0/installer docker:install
 ```
 
 Do not use `npx @umony/agent-memory@latest`. That name is not on npm and will
@@ -38,6 +45,7 @@ The installer shows its plan before it changes anything. It then:
 
 - checks Docker Desktop and the chosen agent apps;
 - downloads fixed Docker image versions;
+- builds the current `V0/` source for the app containers;
 - starts Redis, the REST API, MCP, and the background worker;
 - adds the shared-memory Skill for Codex, Claude, or both;
 - adds the native MCP setting for each chosen agent;
@@ -102,6 +110,45 @@ a named Docker volume. Both the data and secret file are kept by `uninstall`.
 Rule ownership is kept in `rules.json` in the same folder. It stores file
 paths, marker hashes, and placement details, not the contents of your files.
 
+### Run the current source in Docker
+
+`./ams docker:install` runs the guided first setup when needed. It then builds
+the current checkout and puts it on the saved API port. Use the other short
+Docker commands from the repository root:
+
+```bash
+./ams docker:install
+./ams docker:up
+./ams docker:restart app
+./ams docker:reset
+./ams docker:reset --force
+```
+
+| Command | What it does |
+| --- | --- |
+| `./ams docker:install` | Runs the first setup when needed, builds the current `V0/` source, updates older saved memories so the new code can read them, and replaces only the API, MCP, and worker containers. |
+| `./ams docker:up` | Starts the already-built local stack without rebuilding it. |
+| `./ams docker:restart app` | Restarts only the API, MCP, and worker. Redis stays running. |
+| `./ams docker:reset` | Rebuilds the current `V0/` source and recreates the managed containers after asking for confirmation. The Redis memory volume is kept. |
+| `./ams docker:reset --force` | Runs the same safe reset without asking. `--force` does not delete data. |
+
+After changing the source code, run `./ams docker:reset` to rebuild the local
+image and put that new code on the saved ports. Use `--force` only when you want
+to skip the confirmation question.
+
+These commands use the installed settings and API key without printing them.
+The first setup creates those files. Later Docker commands leave them as they
+are. The commands build the local image as
+`umony/agent-memory-server:local`.
+
+Both reset forms keep the named `umony-agent-memory-redis-data` volume. That
+volume contains the memory database. The Redis container may be recreated, but
+the same database volume is attached again. The Skill, MCP settings, agent
+rules, and API key are also kept.
+
+Never add `-v` or `--volumes` to a Docker Compose `down` command. Those flags
+remove the saved database volume.
+
 ### Add an OpenAI key after install
 
 You can skip the key during the first install and add it later. You do not need
@@ -114,6 +161,7 @@ read -s "OPENAI_API_KEY?OpenAI API key: "
 echo
 export OPENAI_API_KEY
 npx --yes ./V0/installer install --yes
+./ams docker:install
 unset OPENAI_API_KEY
 ```
 
@@ -172,7 +220,18 @@ the local `status` or `doctor` commands below to check the install.
 
 ### Useful CLI commands
 
-Run these from the repository root:
+Run these from the repository root. The `./ams` helper is the short form:
+
+```bash
+./ams status
+./ams doctor
+./ams update
+./ams start
+./ams stop
+./ams logs
+```
+
+The longer local installer commands remain supported:
 
 ```bash
 npx --yes ./V0/installer status
@@ -188,10 +247,15 @@ npx --yes ./V0/installer logs --follow
 npx --yes ./V0/installer uninstall
 ```
 
+`./ams start` remembers when the local source image is active. A normal
+`./ams update` moves back to the fixed release image. Run
+`./ams docker:install` afterwards if you want to use the current checkout
+again.
+
 For a team setup without questions:
 
 ```bash
-npx --yes ./V0/installer install \
+./ams docker:install \
   --agents auto \
   --scope user \
   --yes \
@@ -202,7 +266,7 @@ For one repository only, pass its full path while running the command from the
 `agent-memory-server` repository root:
 
 ```bash
-npx --yes ./V0/installer install \
+./ams docker:install \
   --agents codex \
   --scope project \
   --project-dir "/path/to/your/project" \

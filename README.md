@@ -43,7 +43,13 @@ It serves as the research foundation and architectural starting point for Redis 
 - **Start here:** [`V0/README.md`](./V0/README.md)
 - **Quickstart and manual installation:** [`INSTALL.md`](./INSTALL.md)
 - **Current local command:** from this repository root, run
-  `npx --yes ./V0/installer`. The installer is not published to npm.
+  `./ams docker:install`.
+  `npx --yes ./V0/installer docker:install` remains available as a fallback.
+  The installer is not published to npm.
+- **Run the current source in Docker:** use `./ams docker:install`. After code
+  changes, `./ams docker:reset` rebuilds the current source while keeping the
+  Redis memory database; see
+  [`INSTALL.md`](./INSTALL.md#run-the-current-source-in-docker).
 - **Automatic agent rules:** the quickstart safely adds an owned block to the
   active Codex `AGENTS.md` and Claude `CLAUDE.md`; see
   [`INSTALL.md`](./INSTALL.md#use-the-rules-only-commands).

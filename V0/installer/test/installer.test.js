@@ -116,6 +116,309 @@ test("uninstall removes only owned client entries and preserves the Docker volum
   assert.equal(await readFile(rulesPath, "utf8"), "# My own rules\n");
 });
 
+test("Docker reset rebuilds app containers and preserves Redis data", async () => {
+  const fixture = await createFixture();
+  await fixture.installer.run("install", {
+    agents: ["codex"],
+    apiPort: 8000,
+    mcpPort: 9050,
+    projectDir: fixture.project,
+    scope: "user",
+  });
+  fixture.calls.length = 0;
+  const paths = fixture.installer.paths();
+  const runtimeBefore = await readFile(paths.runtimeEnv, "utf8");
+
+  const result = await fixture.installer.run("docker:reset", { force: true });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.dataPreserved, true);
+  const build = fixture.calls.find(
+    (call) => call.command === "docker" && call.args[0] === "build",
+  );
+  assert.ok(build);
+  assert.deepEqual(build.args.slice(0, 6), [
+    "build",
+    "--pull",
+    "--target",
+    "standard",
+    "--tag",
+    "umony/agent-memory-server:local",
+  ]);
+  const down = fixture.calls.find(
+    (call) => call.command === "docker" && call.args.includes("down"),
+  );
+  assert.ok(down);
+  assert.equal(down.args.includes("--remove-orphans"), true);
+  assert.ok(fixture.calls.indexOf(build) < fixture.calls.indexOf(down));
+  const appUp = fixture.calls.find(
+    (call) => call.command === "docker"
+      && call.args.includes("--force-recreate"),
+  );
+  assert.ok(appUp);
+  assert.equal(appUp.args.includes("--no-deps"), true);
+  assert.deepEqual(appUp.args.slice(-3), ["api", "mcp", "worker"]);
+  assert.equal(
+    fixture.calls.some(
+      (call) => call.args.includes("--volumes")
+        || call.args.includes("-v"),
+    ),
+    false,
+  );
+  assert.equal(
+    appUp.options.env.AMS_IMAGE,
+    "umony/agent-memory-server:local",
+  );
+  assert.equal(await readFile(paths.runtimeEnv, "utf8"), runtimeBefore);
+  const state = JSON.parse(await readFile(paths.state, "utf8"));
+  assert.equal(state.localSourceImage, "umony/agent-memory-server:local");
+});
+
+test("Docker install refreshes app containers without taking Redis down", async () => {
+  const fixture = await createFixture();
+  await fixture.installer.run("install", {
+    agents: ["codex"],
+    apiPort: 8000,
+    mcpPort: 9050,
+    projectDir: fixture.project,
+    scope: "user",
+  });
+  fixture.calls.length = 0;
+
+  await fixture.installer.run("docker:install", {});
+
+  assert.equal(
+    fixture.calls.some((call) => call.args.includes("down")),
+    false,
+  );
+  assert.ok(fixture.calls.find((call) => call.args[0] === "build"));
+  assert.ok(fixture.calls.find((call) => call.args.includes("migrate-memories")));
+  const appUp = fixture.calls.find((call) => call.args.includes("--force-recreate"));
+  assert.deepEqual(appUp.args.slice(-3), ["api", "mcp", "worker"]);
+  assert.equal(appUp.args.includes("redis"), false);
+});
+
+test("Docker install performs first setup and ends on the local source image", async () => {
+  const fixture = await createFixture();
+
+  const result = await fixture.installer.run("docker:install", {
+    agents: ["codex"],
+    apiPort: 8000,
+    dryRun: false,
+    mcpPort: 9050,
+    projectDir: fixture.project,
+    scope: "user",
+  });
+
+  assert.equal(result.ok, true);
+  assert.ok(fixture.calls.find((call) => call.args[0] === "build"));
+  const state = JSON.parse(
+    await readFile(fixture.installer.paths().state, "utf8"),
+  );
+  assert.equal(state.phase, "ready");
+  assert.equal(state.localSourceImage, "umony/agent-memory-server:local");
+});
+
+test("Docker install applies supplied settings to an existing setup", async () => {
+  const fixture = await createFixture();
+  await fixture.installer.run("install", {
+    agents: ["codex"],
+    apiPort: 8000,
+    mcpPort: 9050,
+    projectDir: fixture.project,
+    scope: "user",
+  });
+  fixture.calls.length = 0;
+
+  await fixture.installer.run("docker:install", {
+    agents: ["codex"],
+    agentsSpecified: true,
+    apiPort: 8010,
+    mcpPort: 9050,
+    projectDir: fixture.project,
+    scope: "user",
+    yes: true,
+  });
+
+  assert.ok(fixture.calls.find((call) => call.args.includes("pull")));
+  const state = JSON.parse(
+    await readFile(fixture.installer.paths().state, "utf8"),
+  );
+  assert.equal(state.apiPort, 8010);
+  assert.equal(state.localSourceImage, "umony/agent-memory-server:local");
+});
+
+test("Docker up requires the local source image", async () => {
+  const fixture = await createFixture({ missingLocalImage: true });
+  await fixture.installer.run("install", {
+    agents: ["codex"],
+    apiPort: 8000,
+    mcpPort: 9050,
+    projectDir: fixture.project,
+    scope: "user",
+  });
+  fixture.calls.length = 0;
+
+  await assert.rejects(
+    fixture.installer.run("docker:up", {}),
+    { code: "E_LOCAL_IMAGE_MISSING" },
+  );
+  assert.equal(
+    fixture.calls.some((call) => call.args.includes("up")),
+    false,
+  );
+});
+
+test("Docker reset asks before replacing app containers", async () => {
+  const fixture = await createFixture({ confirmResponses: [true, false] });
+  await fixture.installer.run("install", {
+    agents: ["codex"],
+    apiPort: 8000,
+    mcpPort: 9050,
+    projectDir: fixture.project,
+    scope: "user",
+  });
+  fixture.calls.length = 0;
+
+  const result = await fixture.installer.run("docker:reset", { force: false });
+
+  assert.equal(result.cancelled, true);
+  assert.equal(
+    fixture.calls.some(
+      (call) => call.command === "docker" && call.args[0] === "build",
+    ),
+    false,
+  );
+});
+
+test("Docker restart app does not restart Redis", async () => {
+  const fixture = await createFixture();
+  await fixture.installer.run("install", {
+    agents: ["codex"],
+    apiPort: 8000,
+    mcpPort: 9050,
+    projectDir: fixture.project,
+    scope: "user",
+  });
+  fixture.calls.length = 0;
+
+  const result = await fixture.installer.run("docker:restart", {
+    dockerTarget: "app",
+  });
+
+  assert.equal(result.ok, true);
+  const restart = fixture.calls.find(
+    (call) => call.command === "docker" && call.args.includes("restart"),
+  );
+  assert.ok(restart);
+  assert.deepEqual(restart.args.slice(-3), ["api", "mcp", "worker"]);
+  assert.equal(restart.args.includes("redis"), false);
+  const wait = fixture.calls.find(
+    (call) => call.command === "docker"
+      && call.args.includes("up")
+      && call.args.includes("--wait")
+      && !call.args.includes("--force-recreate"),
+  );
+  assert.ok(wait);
+  assert.deepEqual(wait.args.slice(-3), ["api", "mcp", "worker"]);
+});
+
+test("Docker restart does not stop a running app when the local image is missing", async () => {
+  const fixture = await createFixture({ missingLocalImage: true });
+  await fixture.installer.run("install", {
+    agents: ["codex"],
+    apiPort: 8000,
+    mcpPort: 9050,
+    projectDir: fixture.project,
+    scope: "user",
+  });
+  fixture.calls.length = 0;
+
+  await assert.rejects(
+    fixture.installer.run("docker:restart", { dockerTarget: "app" }),
+    { code: "E_LOCAL_IMAGE_MISSING" },
+  );
+  assert.equal(
+    fixture.calls.some((call) => call.args.includes("restart")),
+    false,
+  );
+});
+
+test("all local Docker dry runs leave Docker unchanged", async () => {
+  const fixture = await createFixture();
+  await fixture.installer.run("install", {
+    agents: ["codex"],
+    apiPort: 8000,
+    mcpPort: 9050,
+    projectDir: fixture.project,
+    scope: "user",
+  });
+
+  for (const [command, options] of [
+    ["docker:install", { dryRun: true }],
+    ["docker:reset", { dryRun: true, force: false }],
+    ["docker:up", { dryRun: true }],
+    ["docker:restart", { dockerTarget: "app", dryRun: true }],
+  ]) {
+    fixture.calls.length = 0;
+    fixture.infoMessages.length = 0;
+    const result = await fixture.installer.run(command, options);
+    assert.equal(result.dryRun, true);
+    assert.ok(
+      fixture.infoMessages.some((message) => message.includes("Keep Redis memory volume")),
+    );
+    assert.equal(
+      fixture.calls.some(
+        (call) => ["build", "down", "restart", "run", "up"].some(
+          (action) => call.args.includes(action),
+        ),
+      ),
+      false,
+    );
+  }
+});
+
+test("a failed local image build leaves running containers untouched", async () => {
+  const fixture = await createFixture({ failLocalBuild: true });
+  await fixture.installer.run("install", {
+    agents: ["codex"],
+    apiPort: 8000,
+    mcpPort: 9050,
+    projectDir: fixture.project,
+    scope: "user",
+  });
+  fixture.calls.length = 0;
+
+  await assert.rejects(
+    fixture.installer.run("docker:reset", { force: true }),
+    { code: "E_IMAGE_BUILD" },
+  );
+  assert.equal(
+    fixture.calls.some((call) => call.args.includes("down")),
+    false,
+  );
+});
+
+test("normal start keeps using the saved local source image", async () => {
+  const fixture = await createFixture();
+  await fixture.installer.run("install", {
+    agents: ["codex"],
+    apiPort: 8000,
+    mcpPort: 9050,
+    projectDir: fixture.project,
+    scope: "user",
+  });
+  await fixture.installer.run("docker:install", {});
+  fixture.calls.length = 0;
+
+  await fixture.installer.run("start", {});
+
+  const up = fixture.calls.find(
+    (call) => call.command === "docker" && call.args.includes("up"),
+  );
+  assert.equal(up.options.env.AMS_IMAGE, "umony/agent-memory-server:local");
+});
+
 test("rules-only install updates instruction files without touching Docker, MCP, or Skills", async () => {
   const fixture = await createFixture();
   const result = await fixture.installer.run("rules-install", {
@@ -661,8 +964,8 @@ async function createFixture(options = {}) {
     now: () => new Date("2026-08-27T08:00:00.000Z"),
     output: { isTTY: true, write() {} },
     platform: "darwin",
-    run: async (command, args) => {
-      calls.push({ args, command });
+    run: async (command, args, runOptions = {}) => {
+      calls.push({ args, command, options: runOptions });
       if (["codex", "claude"].includes(command) && args[0] === "--version") {
         return success(`${command} 1.0`);
       }
@@ -697,14 +1000,37 @@ async function createFixture(options = {}) {
       ) {
         return { code: 1, stderr: "unhealthy", stdout: "" };
       }
+      if (
+        command === "docker"
+        && options.failLocalBuild
+        && args[0] === "build"
+      ) {
+        return { code: 1, stderr: "build failed", stdout: "" };
+      }
+      if (
+        command === "docker"
+        && options.missingLocalImage
+        && args[0] === "image"
+        && args[1] === "inspect"
+      ) {
+        return { code: 1, stderr: "missing", stdout: "" };
+      }
       return success();
     },
   });
   await system.mkdir(home);
   await system.mkdir(project);
-  const ui = { confirm: async () => true, info() {}, warn() {} };
+  const confirmResponses = [...(options.confirmResponses ?? [])];
+  const infoMessages = [];
+  const ui = {
+    confirm: async () => confirmResponses.shift() ?? true,
+    info(message) {
+      infoMessages.push(message);
+    },
+    warn() {},
+  };
   const installer = new Installer({ packageRoot: PACKAGE_ROOT, system, ui });
-  return { calls, home, installer, project, system };
+  return { calls, home, infoMessages, installer, project, system };
 }
 
 function success(stdout = "") {

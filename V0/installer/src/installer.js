@@ -20,6 +20,9 @@ import {
   upsertRulesFile,
 } from "./rules.js";
 
+const LOCAL_SOURCE_IMAGE = "umony/agent-memory-server:local";
+const LOCAL_APP_SERVICES = ["api", "mcp", "worker"];
+
 export class Installer {
   constructor({ system, packageRoot, ui }) {
     this.system = system;
@@ -49,6 +52,14 @@ export class Installer {
         return this.logs(options);
       case "uninstall":
         return this.uninstall();
+      case "docker:install":
+        return this.installLocalDocker(options);
+      case "docker:up":
+        return this.startLocalDocker(options);
+      case "docker:restart":
+        return this.restartLocalDocker(options.dockerTarget, options);
+      case "docker:reset":
+        return this.resetLocalDocker(options);
       default:
         throw new InstallerError("E_BAD_COMMAND", `Unsupported command: ${command}`);
     }
@@ -665,6 +676,12 @@ export class Installer {
       [...compose, "up", "--detach", "--wait", "--wait-timeout", "180"],
       "E_STARTUP_TIMEOUT",
       "The Agent Memory containers did not become healthy.",
+      undefined,
+      {
+        env: state.localSourceImage === LOCAL_SOURCE_IMAGE
+          ? { ...this.system.env, AMS_IMAGE: LOCAL_SOURCE_IMAGE }
+          : this.system.env,
+      },
     );
     await this.checkApi(state.apiPort);
     return { changed: true, ok: true, status: "started" };
@@ -694,6 +711,342 @@ export class Installer {
       throw new InstallerError("E_DOCKER", "Docker could not read the runtime logs.");
     }
     return { changed: false, ok: true };
+  }
+
+  async installLocalDocker(options) {
+    const hasSavedInstall = await this.hasSavedInstall();
+    const hasInstallSettings = Boolean(
+      options.agentsSpecified
+      || options.apiPort !== null && options.apiPort !== undefined
+      || options.mcpPort !== null && options.mcpPort !== undefined
+      || options.namespace
+      || options.projectDir
+      || options.scope,
+    );
+    if (!hasSavedInstall || hasInstallSettings) {
+      const installed = await this.install(options, "install");
+      if (installed.cancelled || installed.dryRun) {
+        return installed;
+      }
+    }
+    const context = await this.localDockerContext();
+    const plan = this.localDockerPlan("install");
+    this.printLocalDockerPlan(plan);
+    if (options.dryRun) {
+      return { changed: false, dryRun: true, ok: true, plan };
+    }
+    await this.buildLocalImage(context);
+    await this.startLocalRedis(context);
+    await this.migrateLocalMemories(context);
+    await this.recreateLocalApp(context);
+    await this.checkApi(context.state.apiPort);
+    await this.markLocalSourceImage(context);
+    return {
+      changed: true,
+      dataPreserved: true,
+      localImage: LOCAL_SOURCE_IMAGE,
+      ok: true,
+      status: "Docker source install complete",
+    };
+  }
+
+  async startLocalDocker(options) {
+    const context = await this.localDockerContext();
+    const plan = this.localDockerPlan("up");
+    this.printLocalDockerPlan(plan);
+    if (options.dryRun) {
+      return { changed: false, dryRun: true, ok: true, plan };
+    }
+    await this.assertLocalImage(context);
+    await this.runChecked(
+      "docker",
+      [
+        ...context.compose,
+        "up",
+        "--detach",
+        "--wait",
+        "--wait-timeout",
+        "180",
+      ],
+      "E_STARTUP_TIMEOUT",
+      "The local Agent Memory containers did not become healthy.",
+      undefined,
+      { env: context.env },
+    );
+    await this.checkApi(context.state.apiPort);
+    await this.markLocalSourceImage(context);
+    return {
+      changed: true,
+      dataPreserved: true,
+      ok: true,
+      status: "Docker runtime started",
+    };
+  }
+
+  async restartLocalDocker(target, options) {
+    if (target !== "app") {
+      throw new InstallerError(
+        "E_BAD_OPTION",
+        `Unsupported Docker restart target: ${target ?? "missing"}`,
+        "Use ./ams docker:restart app.",
+      );
+    }
+    const context = await this.localDockerContext();
+    const plan = this.localDockerPlan("restart");
+    this.printLocalDockerPlan(plan);
+    if (options.dryRun) {
+      return { changed: false, dryRun: true, ok: true, plan };
+    }
+    await this.assertLocalImage(context);
+    await this.runChecked(
+      "docker",
+      [...context.compose, "restart", ...LOCAL_APP_SERVICES],
+      "E_DOCKER",
+      "The Agent Memory app containers could not be restarted.",
+      undefined,
+      { env: context.env },
+    );
+    await this.runChecked(
+      "docker",
+      [
+        ...context.compose,
+        "up",
+        "--detach",
+        "--wait",
+        "--wait-timeout",
+        "180",
+        "--no-deps",
+        ...LOCAL_APP_SERVICES,
+      ],
+      "E_STARTUP_TIMEOUT",
+      "The restarted Agent Memory app did not become healthy.",
+      undefined,
+      { env: context.env },
+    );
+    await this.checkApi(context.state.apiPort);
+    await this.markLocalSourceImage(context);
+    return {
+      changed: true,
+      dataPreserved: true,
+      ok: true,
+      status: "Docker app restarted",
+    };
+  }
+
+  async resetLocalDocker(options) {
+    const context = await this.localDockerContext();
+    const plan = {
+      appServices: LOCAL_APP_SERVICES,
+      dataPreserved: true,
+      image: LOCAL_SOURCE_IMAGE,
+      redisVolume: "umony-agent-memory-redis-data",
+    };
+    this.ui.info("Docker reset plan");
+    this.ui.info("  Rebuild the current V0 source");
+    this.ui.info("  Replace the managed containers and Docker network");
+    this.ui.info(`  Keep Redis memory volume: ${plan.redisVolume}`);
+
+    if (options.dryRun) {
+      return { changed: false, dryRun: true, ok: true, plan };
+    }
+    if (!options.force) {
+      let confirmed;
+      try {
+        confirmed = await this.ui.confirm(
+          "Continue? Your saved memories will be kept.",
+          false,
+        );
+      } catch (error) {
+        if (error?.code === "E_CONFIRM_REQUIRED") {
+          throw new InstallerError(
+            "E_CONFIRM_REQUIRED",
+            "Docker reset needs confirmation.",
+            "Run again with --force to skip only this question.",
+          );
+        }
+        throw error;
+      }
+      if (!confirmed) {
+        return { cancelled: true, changed: false, ok: true, plan };
+      }
+    }
+
+    await this.buildLocalImage(context);
+    await this.runChecked(
+      "docker",
+      [...context.compose, "down", "--remove-orphans"],
+      "E_DOCKER",
+      "The old Agent Memory containers could not be stopped.",
+      undefined,
+      { env: context.env },
+    );
+    await this.startLocalRedis(context);
+    await this.migrateLocalMemories(context);
+    await this.recreateLocalApp(context);
+    await this.checkApi(context.state.apiPort);
+    await this.markLocalSourceImage(context);
+    return {
+      changed: true,
+      dataPreserved: true,
+      localImage: LOCAL_SOURCE_IMAGE,
+      ok: true,
+      status: "Docker reset complete",
+    };
+  }
+
+  async localDockerContext() {
+    const { manifest, paths, state } = await this.requireInstall();
+    await this.preflightDocker();
+    for (const required of [paths.compose, paths.runtimeEnv]) {
+      if (!(await this.system.lstatSafe(required))) {
+        throw new InstallerError(
+          "E_NOT_INSTALLED",
+          "The managed Docker files are missing.",
+          "Run ./ams install first.",
+        );
+      }
+    }
+    const sourceRoot = path.resolve(this.packageRoot, "..");
+    if (!(await this.system.lstatSafe(path.join(sourceRoot, "Dockerfile")))) {
+      throw new InstallerError(
+        "E_SOURCE_MISSING",
+        "The V0 Docker source is missing.",
+        "Run this command from an agent-memory-server repository checkout.",
+      );
+    }
+    return {
+      compose: this.composeCommand(paths, manifest),
+      env: { ...this.system.env, AMS_IMAGE: LOCAL_SOURCE_IMAGE },
+      paths,
+      sourceRoot,
+      state,
+    };
+  }
+
+  localDockerPlan(action) {
+    return {
+      action,
+      appServices: LOCAL_APP_SERVICES,
+      dataPreserved: true,
+      image: LOCAL_SOURCE_IMAGE,
+      redisVolume: "umony-agent-memory-redis-data",
+    };
+  }
+
+  printLocalDockerPlan(plan) {
+    const actions = {
+      install: "Build this checkout and replace the app containers",
+      restart: "Restart the app containers",
+      up: "Start the local Docker stack",
+    };
+    this.ui.info("Local Docker plan");
+    this.ui.info(`  Action: ${actions[plan.action]}`);
+    this.ui.info(`  Image: ${plan.image}`);
+    this.ui.info(`  App containers: ${plan.appServices.join(", ")}`);
+    this.ui.info(`  Keep Redis memory volume: ${plan.redisVolume}`);
+  }
+
+  async markLocalSourceImage(context) {
+    await this.writeState(context.paths, {
+      ...context.state,
+      localSourceImage: LOCAL_SOURCE_IMAGE,
+      updatedAt: this.system.now().toISOString(),
+    });
+  }
+
+  async assertLocalImage(context) {
+    const image = await this.system.run(
+      "docker",
+      ["image", "inspect", LOCAL_SOURCE_IMAGE],
+      { env: context.env },
+    );
+    if (image.code !== 0) {
+      throw new InstallerError(
+        "E_LOCAL_IMAGE_MISSING",
+        "The local Agent Memory image has not been built.",
+        "Run ./ams docker:install first.",
+      );
+    }
+  }
+
+  async buildLocalImage(context) {
+    this.ui.info(`Building ${LOCAL_SOURCE_IMAGE} from the current V0 source.`);
+    await this.runChecked(
+      "docker",
+      [
+        "build",
+        "--pull",
+        "--target",
+        "standard",
+        "--tag",
+        LOCAL_SOURCE_IMAGE,
+        context.sourceRoot,
+      ],
+      "E_IMAGE_BUILD",
+      "The local Agent Memory image could not be built.",
+      undefined,
+      { env: context.env, stdio: "inherit" },
+    );
+  }
+
+  async startLocalRedis(context) {
+    await this.runChecked(
+      "docker",
+      [
+        ...context.compose,
+        "up",
+        "--detach",
+        "--wait",
+        "--wait-timeout",
+        "120",
+        "redis",
+      ],
+      "E_REDIS_START",
+      "Redis 8 did not become healthy.",
+      undefined,
+      { env: context.env },
+    );
+  }
+
+  async migrateLocalMemories(context) {
+    await this.runChecked(
+      "docker",
+      [
+        ...context.compose,
+        "run",
+        "--rm",
+        "--no-deps",
+        "api",
+        "agent-memory",
+        "migrate-memories",
+      ],
+      "E_MIGRATION",
+      "Memory migration failed.",
+      undefined,
+      { env: context.env },
+    );
+  }
+
+  async recreateLocalApp(context) {
+    await this.runChecked(
+      "docker",
+      [
+        ...context.compose,
+        "up",
+        "--detach",
+        "--wait",
+        "--wait-timeout",
+        "180",
+        "--no-deps",
+        "--force-recreate",
+        "--remove-orphans",
+        ...LOCAL_APP_SERVICES,
+      ],
+      "E_STARTUP_TIMEOUT",
+      "The Agent Memory app containers did not become healthy.",
+      undefined,
+      { env: context.env },
+    );
   }
 
   async uninstall() {
@@ -1264,10 +1617,20 @@ export class Installer {
     ];
   }
 
-  async runChecked(command, args, code, message, hint = undefined) {
+  async runChecked(
+    command,
+    args,
+    code,
+    message,
+    hint = undefined,
+    runOptions = {},
+  ) {
     let result;
     try {
-      result = await this.system.run(command, args, { env: this.system.env });
+      result = await this.system.run(command, args, {
+        env: this.system.env,
+        ...runOptions,
+      });
     } catch (error) {
       if (error && error.code === "ENOENT") {
         throw new InstallerError(code, message, hint);

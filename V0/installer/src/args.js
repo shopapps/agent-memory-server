@@ -1,6 +1,10 @@
 import { InstallerError } from "./errors.js";
 
 const COMMANDS = new Set([
+  "docker:install",
+  "docker:reset",
+  "docker:restart",
+  "docker:up",
   "doctor",
   "install",
   "logs",
@@ -24,6 +28,7 @@ const VALUE_FLAGS = new Map([
 export function parseArgs(argv) {
   const args = [...argv];
   let command = "install";
+  let dockerTarget = null;
 
   if (args[0] === "rules") {
     args.shift();
@@ -51,12 +56,35 @@ export function parseArgs(argv) {
     }
   }
 
+  if (command === "docker:restart") {
+    const helpOrVersion = ["--help", "-h", "--version", "-v"].includes(args[0]);
+    if (!helpOrVersion) {
+      dockerTarget = args.shift();
+    }
+    if (!dockerTarget && !helpOrVersion) {
+      throw new InstallerError(
+        "E_BAD_OPTION",
+        "docker:restart needs a target.",
+        "Use docker:restart app.",
+      );
+    }
+    if (!helpOrVersion && dockerTarget !== "app") {
+      throw new InstallerError(
+        "E_BAD_OPTION",
+        `Unsupported Docker restart target: ${dockerTarget}`,
+        "Use app to restart the API, MCP server, and worker while keeping Redis running.",
+      );
+    }
+  }
+
   const options = {
     agents: null,
     agentsSpecified: false,
     apiPort: null,
     dryRun: false,
+    dockerTarget,
     follow: false,
+    force: false,
     help: false,
     json: false,
     mcpPort: null,
@@ -90,6 +118,9 @@ export function parseArgs(argv) {
         break;
       case "--follow":
         options.follow = true;
+        break;
+      case "--force":
+        options.force = true;
         break;
       case "--help":
       case "-h":
@@ -125,6 +156,13 @@ export function parseArgs(argv) {
     ? null
     : parsePort(options.mcpPort, "--mcp-port");
   options.agents = parseAgents(options.agents);
+  validateDockerOptions(command, options);
+  if (options.force && command !== "docker:reset") {
+    throw new InstallerError(
+      "E_BAD_OPTION",
+      "--force can only be used with docker:reset.",
+    );
+  }
   if (options.scope && !["project", "user"].includes(options.scope)) {
     throw new InstallerError(
       "E_BAD_SCOPE",
@@ -134,6 +172,41 @@ export function parseArgs(argv) {
   }
 
   return { command, options };
+}
+
+function validateDockerOptions(command, options) {
+  if (!command.startsWith("docker:")) {
+    return;
+  }
+  if (command === "docker:reset" && options.yes) {
+    throw new InstallerError(
+      "E_BAD_OPTION",
+      "docker:reset does not use --yes.",
+      "Use --force to skip only the reset confirmation.",
+    );
+  }
+  if (command === "docker:install") {
+    return;
+  }
+
+  const unused = [];
+  if (options.agentsSpecified) unused.push("--agents");
+  if (options.scope) unused.push("--scope");
+  if (options.projectDir) unused.push("--project-dir");
+  if (options.namespace) unused.push("--namespace");
+  if (options.apiPort !== null) unused.push("--api-port");
+  if (options.mcpPort !== null) unused.push("--mcp-port");
+  if (options.follow) unused.push("--follow");
+  if (options.yes) unused.push("--yes");
+  if (options.nonInteractive && command !== "docker:reset") {
+    unused.push("--non-interactive");
+  }
+  if (unused.length > 0) {
+    throw new InstallerError(
+      "E_BAD_OPTION",
+      `${unused.join(", ")} cannot be used with ${command}.`,
+    );
+  }
 }
 
 function parsePort(value, flag) {
@@ -164,13 +237,17 @@ function parseAgents(value) {
   return agents;
 }
 
-export function helpText() {
+export function helpText(programName = "agent-memory") {
   return `Agent Memory local installer
 
 Usage:
-  agent-memory [command] [options]
+  ${programName} [command] [options]
 
 Commands:
+  docker:install  Build this checkout and safely install its app containers
+  docker:up       Start the local Docker stack without rebuilding it
+  docker:restart app  Restart the API, MCP server, and worker; keep Redis running
+  docker:reset [--force]  Rebuild the stack but keep the Redis memory database
   install      Install or repair the runtime, Skill, MCP, and agent rules (default)
   rules install  Add safe shared-memory rules without changing the runtime
   rules update   Update only the installer-owned shared-memory rules
@@ -195,6 +272,7 @@ Options:
   --yes, -y                         Accept the safe install plan
   --json                            Print one JSON result
   --follow                          Follow logs instead of returning
+  --force                           Skip only the docker:reset confirmation
   --help, -h                        Show this help
   --version, -v                     Show the CLI version
 `;

@@ -19,7 +19,7 @@ export async function main(argv, dependencies = {}) {
   try {
     parsed = parseArgs(argv);
     if (parsed.options.help) {
-      system.output.write(helpText());
+      system.output.write(helpText(system.env.AMS_CLI_NAME ?? "agent-memory"));
       return 0;
     }
     if (parsed.options.version) {
@@ -75,12 +75,19 @@ export async function resolveGuidedOptions(
   if (
     options.projectDir
     && !options.scope
-    && ["install", "rules-install", "rules-uninstall", "rules-update"].includes(command)
+    && [
+      "docker:install",
+      "install",
+      "rules-install",
+      "rules-uninstall",
+      "rules-update",
+    ].includes(command)
   ) {
     options.scope = "project";
   }
   const rulesOnly = ["rules-install", "rules-uninstall", "rules-update"].includes(command);
-  if ((!rulesOnly && command !== "install") || (command === "install" && hasSavedInstall)) {
+  const installsRuntime = ["docker:install", "install"].includes(command);
+  if ((!rulesOnly && !installsRuntime) || (installsRuntime && hasSavedInstall)) {
     return;
   }
   if (command === "rules-update" && (hasSavedInstall || hasSavedRules)) {
