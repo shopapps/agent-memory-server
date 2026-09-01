@@ -218,6 +218,117 @@ the supported bearer token.
 If you chose different ports, use those port numbers instead. You can also run
 the local `status` or `doctor` commands below to check the install.
 
+### Use shared memory in agent tasks
+
+The installer gives Codex and Claude three things:
+
+- an MCP connection, which is the link to the memory server;
+- a shared-memory Skill, which explains how to use that link safely;
+- agent rules, which tell new tasks when to read and write memory.
+
+The rules tell an agent to search before project work and save new, checked
+facts after project work. This happens while an agent task is running. It is
+not a timer or a background job.
+
+#### Save one fact on purpose
+
+Give an agent a plain prompt like this:
+
+```text
+Use shared memory. Save this checked project fact:
+"The demo service uses port 4321."
+Use the current repository for the project scope. Tell me when it is saved.
+```
+
+The agent should use the `create_long_term_memories` memory tool. A saved fact
+may use the configured embedding provider and a small amount of API credit.
+Do not ask an agent to save passwords, API keys, guesses, chat logs, or short
+task status.
+
+#### Read the fact in a new task
+
+Start a new task in the same repository and ask:
+
+```text
+What port does the demo service use?
+```
+
+With the automatic rules loaded, the agent should search shared memory before
+answering and return `4321`. In the task details, look for a call to
+`memory_prompt` or `search_long_term_memory`. You can also search for the fact
+in the [memory graph](http://127.0.0.1:8000/admin/memories/graph).
+
+Delete the sample memory from the graph when the test is finished if you do not
+want to keep it.
+
+#### Turn automatic use on for every project
+
+For a new install, choose user scope so the Skill, MCP connection, and rules
+apply to new agent tasks in every repository on this Mac:
+
+```bash
+./ams docker:install \
+  --agents all \
+  --scope user \
+  --yes \
+  --non-interactive
+```
+
+For an existing install, add the user-level rules the first time:
+
+```bash
+./ams rules install --agents all --scope user --yes
+```
+
+Refresh them after this project changes the rule text:
+
+```bash
+./ams rules update --agents all --scope user --yes
+```
+
+Then check the whole setup:
+
+```bash
+./ams doctor
+```
+
+Start a new Codex or Claude task after changing the rules. Existing open tasks
+may still be using the old instructions.
+
+User-level rules choose a separate memory scope for each Git repository. The
+remote `owner/name` is used when available. A project-level install applies
+only to the chosen repository.
+
+#### Two quick checks for Codex
+
+**Check 1: direct write and read**
+
+1. Use the save prompt above in one Codex task.
+2. Confirm that the new fact appears in the graph.
+3. Open a new Codex task in the same repository.
+4. Ask for the port without telling Codex to use memory.
+5. Confirm that Codex searches memory and answers `4321`.
+
+**Check 2: automatic project use**
+
+1. Run `./ams doctor` and check that the containers, Codex MCP connection,
+   shared-memory Skill, and Codex rules are healthy.
+2. Start a new Codex task in another Git repository.
+3. Ask Codex to inspect one small part of that project.
+4. Check the task details for a memory search near the start.
+5. If Codex finds a new, useful, checked fact, check the graph for a write near
+   the end of the task.
+
+The second check may not add a memory every time. Agents should only save facts
+that will help later. Similar facts may also be merged. This means a total such
+as 45 memories can be healthy even after many tasks. The direct write-and-read
+check is a better test than the total count.
+
+If the direct check fails, run `./ams doctor`, refresh the rules, and start a
+new task. If Doctor reports an unhealthy container, run `./ams docker:up`. If
+it reports a missing Skill or MCP connection, rerun `./ams docker:install` with
+the same user-scope options shown above.
+
 ### Useful CLI commands
 
 Run these from the repository root. The `./ams` helper is the short form:

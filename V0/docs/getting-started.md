@@ -29,6 +29,8 @@ It runs the first setup when needed, builds the current source, and replaces
 the app containers while keeping the Redis memory database. The safe start,
 restart, and reset commands are listed in the
 [local install guide](../../INSTALL.md#run-the-current-source-in-docker).
+The same guide has [simple agent prompts and Codex checks](../../INSTALL.md#use-shared-memory-in-agent-tasks)
+for saving, recalling, and automatically using project memory.
 
 But you can also run these components via the CLI commands. Here's how you
 run the REST API server:

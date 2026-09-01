@@ -51,8 +51,9 @@ It serves as the research foundation and architectural starting point for Redis 
   Redis memory database; see
   [`INSTALL.md`](./INSTALL.md#run-the-current-source-in-docker).
 - **Automatic agent rules:** the quickstart safely adds an owned block to the
-  active Codex `AGENTS.md` and Claude `CLAUDE.md`; see
-  [`INSTALL.md`](./INSTALL.md#use-the-rules-only-commands).
+  active Codex `AGENTS.md` and Claude `CLAUDE.md`. See the
+  [simple memory examples](./INSTALL.md#use-shared-memory-in-agent-tasks) and
+  [`rules` commands](./INSTALL.md#use-the-rules-only-commands).
 - **Documentation:** [`V0/docs/`](./V0/docs/index.md)
 - **Local API docs after install:**
   [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)

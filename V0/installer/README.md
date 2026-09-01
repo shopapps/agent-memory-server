@@ -100,6 +100,9 @@ the managed containers. Reset never passes a volume-removal flag, so the
 `umony-agent-memory-redis-data` memory database is kept. `--force` skips only
 the reset question.
 
+See the main [install guide](../../INSTALL.md#use-shared-memory-in-agent-tasks)
+for simple save, recall, automatic-use, and Codex test examples.
+
 ## Optional local command
 
 To use `agent-memory` without the longer `npx` prefix:
