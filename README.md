@@ -59,7 +59,13 @@ It serves as the research foundation and architectural starting point for Redis 
   [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - **Local memory graph after install:**
   [http://127.0.0.1:8000/admin/memories/graph](http://127.0.0.1:8000/admin/memories/graph)
+  The graph silently checks for new memories every 10 seconds and adds them
+  without resetting the current view.
 - Build, test, and run everything from inside `V0/` (e.g. `cd V0 && make test`).
+
+![An anonymised example of the memory graph](./V0/docs/images/memory-graph-example.png)
+
+_Example only: every label, memory and count in this image is made up._
 
 ## License
 

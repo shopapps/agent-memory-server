@@ -74,6 +74,16 @@ Browsing uses filter and keyword searches only, so it does not call an AI
 model. Saving an edit rebuilds the memory's search embedding and may use the
 configured embedding provider.
 
+The graph silently checks for changes every 10 seconds. A new memory appears
+without a page reload and briefly shows a ripple around its node. Your zoom,
+position, filters, and selected memory stay in place. Refreshes pause while you
+search, drag, edit, or confirm a deletion. A failed check leaves the current
+graph untouched.
+
+![An anonymised example of the memory graph](./images/memory-graph-example.png)
+
+_Example only: every label, memory and count in this image is made up._
+
 Use **Delete** in a memory panel to remove that memory. The page asks for
 confirmation first. Deletion cannot be undone, still works for pinned memories,
 and does not delete related memories or use AI credits.

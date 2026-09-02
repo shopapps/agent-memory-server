@@ -495,7 +495,11 @@ async def memory_graph_page(
 ):
     """Serve the packaged human memory graph page."""
 
-    return FileResponse(_UI_DIRECTORY / "graph.html", media_type="text/html")
+    return FileResponse(
+        _UI_DIRECTORY / "graph.html",
+        media_type="text/html",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @router.get("/admin/memories/graph/graph.css", include_in_schema=False)
@@ -504,7 +508,11 @@ async def memory_graph_styles(
 ):
     """Serve the packaged graph styles."""
 
-    return FileResponse(_UI_DIRECTORY / "graph.css", media_type="text/css")
+    return FileResponse(
+        _UI_DIRECTORY / "graph.css",
+        media_type="text/css",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @router.get("/admin/memories/graph/graph.js", include_in_schema=False)
@@ -516,4 +524,5 @@ async def memory_graph_script(
     return FileResponse(
         _UI_DIRECTORY / "graph.js",
         media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
     )

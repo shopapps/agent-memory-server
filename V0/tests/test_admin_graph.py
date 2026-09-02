@@ -253,9 +253,13 @@ async def test_graph_page_and_assets_are_packaged(client):
 
     assert page.status_code == 200
     assert "Memory Graph" in page.text
+    assert "graph.js?v=live-refresh" in page.text
+    assert page.headers["cache-control"] == "no-cache"
     assert styles.status_code == 200
+    assert styles.headers["cache-control"] == "no-cache"
     assert "--canvas" in styles.text
     assert script.status_code == 200
+    assert script.headers["cache-control"] == "no-cache"
     assert "requestAnimationFrame" in script.text
     assert 'id="edit-memory"' in page.text
     assert 'id="delete-memory"' in page.text
@@ -271,6 +275,16 @@ async def test_graph_page_and_assets_are_packaged(client):
     assert "createRadialGradient" in script.text
     assert 'method: "DELETE"' in script.text
     assert 'parameters.append("memory_ids", memory.id)' in script.text
+    assert "const GRAPH_POLL_INTERVAL_MS = 10_000;" in script.text
+    assert "function mergeGraph(data)" in script.text
+    assert "Object.assign(existingNode, node" in script.text
+    assert "state.newMemoryRipples.set(node.id" in script.text
+    assert "delete stableMemory.last_accessed" in script.text
+    assert script.text.count("state.deletingNodeId ||\n      searchTimer") == 1
+    assert script.text.count("state.deletingNodeId ||\n        searchTimer") == 1
+    assert "loadGraph(null, { merge: true, silent: true })" in script.text
+    assert "window.setTimeout(pollGraph, GRAPH_POLL_INTERVAL_MS)" in script.text
+    assert "setInterval(" not in script.text
 
 
 @pytest.mark.asyncio

@@ -59,6 +59,9 @@ call an AI model. Saving an edit may use the
 configured embedding provider. Deletion asks for confirmation, is permanent,
 and does not use an AI model.
 
+The graph also checks for new memories every 10 seconds. It adds them with a
+short ripple without resetting the current view.
+
 ### 1. Installation
 
 #### Using Docker

@@ -204,6 +204,12 @@ Click a listed memory to open it. Topic and Entity tags in a memory panel also
 jump to the matching graph node. Larger nodes have more links or more memory
 text, and each node has a coloured halo so groups are easier to see.
 
+The graph silently checks for changes every 10 seconds. New memories appear
+without a page reload and briefly show a ripple around their node. The refresh
+keeps the current zoom, position, filters, and selected memory. It pauses while
+you search, drag, edit, or confirm a deletion. If a check fails, the current
+graph stays in place.
+
 The memory panel also has **Delete**. It asks again before deleting and removes
 only that memory. Deletion is permanent. A pinned memory can still be deleted
 by hand, and deleting does not use OpenAI credits. Only give graph access to

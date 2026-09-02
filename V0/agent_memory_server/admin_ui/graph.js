@@ -43,12 +43,18 @@ const EDGE_LENGTHS = {
   derived_from: 76,
 };
 
-const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const GRAPH_POLL_INTERVAL_MS = 10_000;
+const NEW_MEMORY_RIPPLE_MS = 850;
+const MAX_NEW_MEMORY_RIPPLES = 12;
+const motionPreference = window.matchMedia("(prefers-reduced-motion: reduce)");
+let reducedMotion = motionPreference.matches;
 const state = {
   raw: null,
+  graphSignature: "",
   nodes: [],
   edges: [],
   nodeById: new Map(),
+  newMemoryRipples: new Map(),
   selectedNodeId: null,
   editingNodeId: null,
   deletingNodeId: null,
@@ -64,7 +70,16 @@ const state = {
   temperature: reducedMotion ? 0 : 1,
   animationFrame: null,
   loadNumber: 0,
+  loadInFlight: false,
 };
+
+motionPreference.addEventListener?.("change", (event) => {
+  reducedMotion = event.matches;
+  if (reducedMotion) {
+    state.newMemoryRipples.clear();
+    state.temperature = 0;
+  }
+});
 
 function hashString(value) {
   let hash = 2166136261;
@@ -135,14 +150,38 @@ function visibleEdges(visibleIds) {
   );
 }
 
+function graphSignature(data) {
+  return JSON.stringify({
+    nodes: data.nodes.map((node) => {
+      if (!node.memory) return node;
+      const stableMemory = { ...node.memory };
+      delete stableMemory.access_count;
+      delete stableMemory.last_accessed;
+      return { ...node, memory: stableMemory };
+    }),
+    edges: data.edges,
+    facets: data.facets,
+    memory_count: data.memory_count,
+    truncated: data.truncated,
+    facets_truncated: data.facets_truncated,
+  });
+}
+
+function connectionCounts(edges) {
+  const counts = new Map();
+  for (const edge of edges) {
+    counts.set(edge.source, (counts.get(edge.source) || 0) + 1);
+    counts.set(edge.target, (counts.get(edge.target) || 0) + 1);
+  }
+  return counts;
+}
+
 function initialiseGraph(data) {
   state.raw = data;
+  state.graphSignature = graphSignature(data);
   state.nodeById = new Map();
-  const connectionCounts = new Map();
-  for (const edge of data.edges) {
-    connectionCounts.set(edge.source, (connectionCounts.get(edge.source) || 0) + 1);
-    connectionCounts.set(edge.target, (connectionCounts.get(edge.target) || 0) + 1);
-  }
+  state.newMemoryRipples.clear();
+  const counts = connectionCounts(data.edges);
   const random = seededRandom(hashString(JSON.stringify(data.nodes.map((node) => node.id))));
   const projectNodes = data.nodes.filter((node) => node.kind === "project");
   const projectPositions = new Map();
@@ -174,7 +213,7 @@ function initialiseGraph(data) {
     };
     const graphNode = {
       ...node,
-      connectionCount: connectionCounts.get(node.id) || 0,
+      connectionCount: counts.get(node.id) || 0,
       x: position.x,
       y: position.y,
       vx: 0,
@@ -196,6 +235,102 @@ function initialiseGraph(data) {
   emptyState.hidden = data.memory_count > 0;
   resetCamera(false);
   state.autoFit = true;
+}
+
+function positionForNewNode(node, data, positionedNodes, random) {
+  const anchors = [];
+  for (const edge of data.edges) {
+    let connectedId = null;
+    if (edge.source === node.id) connectedId = edge.target;
+    if (edge.target === node.id) connectedId = edge.source;
+    const connectedNode = connectedId ? positionedNodes.get(connectedId) : null;
+    if (connectedNode) anchors.push(connectedNode);
+  }
+
+  const centre = anchors.length
+    ? {
+        x: anchors.reduce((sum, anchor) => sum + anchor.x, 0) / anchors.length,
+        y: anchors.reduce((sum, anchor) => sum + anchor.y, 0) / anchors.length,
+      }
+    : {
+        x: -state.camera.x / state.camera.scale,
+        y: -state.camera.y / state.camera.scale,
+      };
+  const angle = random() * Math.PI * 2;
+  const distance = node.kind === "project" ? 72 : 28 + random() * 34;
+  return {
+    x: centre.x + Math.cos(angle) * distance,
+    y: centre.y + Math.sin(angle) * distance,
+  };
+}
+
+function mergeGraph(data) {
+  const signature = graphSignature(data);
+  if (signature === state.graphSignature) return 0;
+
+  const existingNodes = state.nodeById;
+  const positionedNodes = new Map(existingNodes);
+  const nextNodeById = new Map();
+  const nextNodes = [];
+  const counts = connectionCounts(data.edges);
+  const random = seededRandom(hashString(JSON.stringify(data.nodes.map((node) => node.id))));
+  const newMemoryNodes = [];
+
+  for (const node of data.nodes) {
+    const existingNode = existingNodes.get(node.id);
+    if (existingNode) {
+      Object.assign(existingNode, node, {
+        connectionCount: counts.get(node.id) || 0,
+      });
+      nextNodes.push(existingNode);
+      nextNodeById.set(existingNode.id, existingNode);
+      continue;
+    }
+
+    const position = positionForNewNode(node, data, positionedNodes, random);
+    const graphNode = {
+      ...node,
+      connectionCount: counts.get(node.id) || 0,
+      x: position.x,
+      y: position.y,
+      vx: 0,
+      vy: 0,
+      fixed: false,
+      phase: random() * Math.PI * 2,
+    };
+    nextNodes.push(graphNode);
+    nextNodeById.set(graphNode.id, graphNode);
+    positionedNodes.set(graphNode.id, graphNode);
+    if (graphNode.kind === "memory") newMemoryNodes.push(graphNode);
+  }
+
+  state.raw = data;
+  state.graphSignature = signature;
+  state.nodes = nextNodes;
+  state.nodeById = nextNodeById;
+  state.edges = data.edges;
+  emptyState.hidden = data.memory_count > 0;
+
+  if (!reducedMotion) {
+    const startedAt = performance.now();
+    for (const node of newMemoryNodes.slice(-MAX_NEW_MEMORY_RIPPLES)) {
+      state.newMemoryRipples.set(node.id, startedAt);
+    }
+    while (state.newMemoryRipples.size > MAX_NEW_MEMORY_RIPPLES) {
+      state.newMemoryRipples.delete(state.newMemoryRipples.keys().next().value);
+    }
+  }
+
+  if (state.selectedNodeId) {
+    const selectedNode = state.nodeById.get(state.selectedNodeId);
+    if (!selectedNode) {
+      closeInspector();
+    } else if (!state.editingNodeId && !state.deletingNodeId) {
+      renderInspectorDetails(selectedNode);
+    }
+  }
+
+  return newMemoryNodes.length;
 }
 
 function stepSimulation() {
@@ -346,6 +481,31 @@ function drawGraph(timestamp = 0) {
     const color = NODE_COLORS[node.kind];
 
     context.save();
+    const rippleStartedAt = state.newMemoryRipples.get(node.id);
+    if (rippleStartedAt !== undefined) {
+      const rippleProgress = Math.max(
+        0,
+        Math.min(1, (timestamp - rippleStartedAt) / NEW_MEMORY_RIPPLE_MS),
+      );
+      if (rippleProgress >= 1 || reducedMotion) {
+        state.newMemoryRipples.delete(node.id);
+      } else {
+        const easedProgress = 1 - (1 - rippleProgress) ** 3;
+        context.globalAlpha = (1 - rippleProgress) * 0.8;
+        context.strokeStyle = color;
+        context.lineWidth = Math.max(1, 2 * state.camera.scale);
+        context.beginPath();
+        context.arc(
+          point.x,
+          point.y,
+          Math.max(9, radius + 7 + easedProgress * 24),
+          0,
+          Math.PI * 2,
+        );
+        context.stroke();
+      }
+    }
+
     const haloRadius = Math.max(
       13,
       radius * (isSelected ? 3.8 : isHovered ? 3.3 : 2.75),
@@ -1028,9 +1188,16 @@ function setSelectOptions(select, firstLabel, facets) {
     option.textContent = `${facet.label} (${facet.count})`;
     select.append(option);
   }
-  select.value = [...select.options].some((option) => option.value === currentValue)
-    ? currentValue
-    : "";
+  if (
+    currentValue &&
+    ![...select.options].some((option) => option.value === currentValue)
+  ) {
+    const selected = document.createElement("option");
+    selected.value = currentValue;
+    selected.textContent = `${currentValue} (selected)`;
+    select.append(selected);
+  }
+  select.value = currentValue;
 }
 
 function renderProjectTabs(facets) {
@@ -1039,6 +1206,21 @@ function renderProjectTabs(facets) {
     { field: "", value: "", label: "All", count: allCount, separator: "/" },
     ...facets,
   ];
+  if (
+    state.projectValue &&
+    !facets.some(
+      (facet) =>
+        facet.field === state.projectField && facet.value === state.projectValue,
+    )
+  ) {
+    choices.push({
+      field: state.projectField,
+      value: state.projectValue,
+      label: state.projectValue.split(/[/.]/).at(-1),
+      count: 0,
+      separator: state.projectSeparator,
+    });
+  }
   projectTabs.replaceChildren();
 
   for (const choice of choices) {
@@ -1070,10 +1252,29 @@ function renderProjectTabs(facets) {
   }
 }
 
-async function loadGraph(selectedMemoryId = null) {
+async function loadGraph(
+  selectedMemoryId = null,
+  { merge = false, silent = false } = {},
+) {
+  if (
+    silent &&
+    (state.loadInFlight ||
+      document.hidden ||
+      navigator.onLine === false ||
+      state.pointer ||
+      state.editingNodeId ||
+      state.deletingNodeId ||
+      searchTimer)
+  ) {
+    return;
+  }
+
   const loadNumber = ++state.loadNumber;
-  loadStatus.classList.remove("error");
-  loadStatus.textContent = "Loading memories…";
+  state.loadInFlight = true;
+  if (!silent) {
+    loadStatus.classList.remove("error");
+    loadStatus.textContent = "Loading memories…";
+  }
 
   const parameters = new URLSearchParams({ limit: "250" });
   if (state.projectField && state.projectValue) {
@@ -1099,32 +1300,62 @@ async function loadGraph(selectedMemoryId = null) {
     }
     const data = await response.json();
     if (loadNumber !== state.loadNumber) return;
-    initialiseGraph(data);
-    renderProjectTabs(data.facets.projects);
-    setSelectOptions(namespaceFilter, "All namespaces", data.facets.namespaces);
-    setSelectOptions(typeFilter, "All types", data.facets.memory_types);
-    setSelectOptions(agentFilter, "All agents", data.facets.agents);
+    if (
+      silent &&
+      (document.hidden ||
+        state.pointer ||
+        state.editingNodeId ||
+        state.deletingNodeId ||
+        searchTimer)
+    ) {
+      return;
+    }
+
+    const previousFacets = JSON.stringify(state.raw?.facets || null);
+    const nextFacets = JSON.stringify(data.facets);
+    const graphChanged = state.graphSignature !== graphSignature(data);
+    if (merge && state.raw) {
+      mergeGraph(data);
+    } else {
+      initialiseGraph(data);
+    }
+    if (!merge || previousFacets !== nextFacets) {
+      renderProjectTabs(data.facets.projects);
+      setSelectOptions(namespaceFilter, "All namespaces", data.facets.namespaces);
+      setSelectOptions(typeFilter, "All types", data.facets.memory_types);
+      setSelectOptions(agentFilter, "All agents", data.facets.agents);
+    }
     if (selectedMemoryId) {
       const selectedNode = state.nodeById.get(`memory:${selectedMemoryId}`);
       if (selectedNode) selectNode(selectedNode);
     }
     const suffix = data.truncated ? "+" : "";
     const facetNote = data.facets_truncated ? " · filter list capped" : "";
-    loadStatus.textContent = `${data.memory_count}${suffix} memories${facetNote}`;
+    const statusText = `${data.memory_count}${suffix} memories${facetNote}`;
+    if (!silent || graphChanged || loadStatus.textContent !== statusText) {
+      loadStatus.classList.remove("error");
+      loadStatus.textContent = statusText;
+    }
   } catch (error) {
     if (loadNumber !== state.loadNumber) return;
+    if (silent) return;
     loadStatus.classList.add("error");
     loadStatus.textContent = error instanceof Error ? error.message : "The memory graph could not load.";
     emptyState.hidden = false;
     emptyState.querySelector("strong").textContent = "Graph unavailable";
     emptyState.querySelector("span").textContent = loadStatus.textContent;
+  } finally {
+    if (loadNumber === state.loadNumber) state.loadInFlight = false;
   }
 }
 
-let searchTimer;
+let searchTimer = null;
 searchInput.addEventListener("input", () => {
   window.clearTimeout(searchTimer);
-  searchTimer = window.setTimeout(loadGraph, 280);
+  searchTimer = window.setTimeout(() => {
+    searchTimer = null;
+    loadGraph();
+  }, 280);
 });
 namespaceFilter.addEventListener("change", () => loadGraph());
 typeFilter.addEventListener("change", () => loadGraph());
@@ -1184,6 +1415,13 @@ window.addEventListener("keydown", (event) => {
   closeInspector();
 });
 
+async function pollGraph() {
+  await loadGraph(null, { merge: true, silent: true });
+  window.setTimeout(pollGraph, GRAPH_POLL_INTERVAL_MS);
+}
+
 resizeCanvas();
-loadGraph();
+loadGraph().finally(() => {
+  window.setTimeout(pollGraph, GRAPH_POLL_INTERVAL_MS);
+});
 state.animationFrame = requestAnimationFrame(drawGraph);
