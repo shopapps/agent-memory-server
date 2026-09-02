@@ -4,6 +4,10 @@
 
 A memory layer that gives agents intelligent short-term memory and persistent context across conversations.
 
+![An anonymised example of the memory graph](./V0/docs/images/memory-graph-example.png)
+
+_Example only: every label, memory and count in this image is made up._
+
 </div>
 
 ## Redis Agent Memory in Redis Iris
@@ -63,9 +67,7 @@ It serves as the research foundation and architectural starting point for Redis 
   without resetting the current view.
 - Build, test, and run everything from inside `V0/` (e.g. `cd V0 && make test`).
 
-![An anonymised example of the memory graph](./V0/docs/images/memory-graph-example.png)
 
-_Example only: every label, memory and count in this image is made up._
 
 ## License
 
