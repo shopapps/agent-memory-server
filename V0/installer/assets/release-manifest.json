@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "installerVersion": "0.1.0",
+  "serverVersion": "0.15.2",
+  "serverImage": "docker.io/redislabs/agent-memory-server:0.15.2@sha256:eee2a81fcc71e72414b6ed42ca5be954540c814f46265b2223e8d9b856916ef9",
+  "redisVersion": "8.10.1",
+  "redisImage": "docker.io/library/redis:8.10.1@sha256:298e5b3bc566bade82f46ad5511777a4a07a294097ce16ada2f6a42be5239df5",
+  "composeProject": "shopapps-agent-memory",
+  "redisVolume": "shopapps-agent-memory-redis-data",
+  "mcpName": "shared-memory"
+}

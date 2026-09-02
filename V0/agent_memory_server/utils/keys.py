@@ -2,8 +2,10 @@
 
 import logging
 import warnings
+from urllib.parse import quote
 
 from agent_memory_server.config import settings
+from agent_memory_server.scopes import SHARED_SCOPE
 
 
 logger = logging.getLogger(__name__)
@@ -74,20 +76,42 @@ class Keys:
 
     @staticmethod
     def working_memory_key(
+        session_id: str,
+        user_id: str | None = None,
+        namespace: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> str:
+        """Get the fixed, scope-safe working memory key for a session."""
+        if session_id == "*" and not any((user_id, namespace, project_id, agent_id)):
+            return "working_memory:*"
+
+        def part(value: str | None) -> str:
+            return quote(value or SHARED_SCOPE, safe="")
+
+        return ":".join(
+            (
+                "working_memory",
+                "v1",
+                part(namespace),
+                part(project_id),
+                part(user_id),
+                part(agent_id),
+                part(session_id),
+            )
+        )
+
+    @staticmethod
+    def legacy_working_memory_key(
         session_id: str, user_id: str | None = None, namespace: str | None = None
     ) -> str:
-        """Get the working memory key for a session."""
-        # Build key components, filtering out None values
+        """Get the old working-memory key shape for compatibility reads."""
         key_parts = ["working_memory"]
-
         if namespace:
             key_parts.append(namespace)
-
         if user_id:
             key_parts.append(user_id)
-
         key_parts.append(session_id)
-
         return ":".join(key_parts)
 
     @staticmethod

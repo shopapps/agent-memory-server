@@ -12,7 +12,12 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 import pytest
 
-from agent_memory_client import MemoryAPIClient, MemoryClientConfig
+from agent_memory_client import (
+    MemoryAPIClient,
+    MemoryClientConfig,
+    MemoryNotFoundError,
+)
+from agent_memory_client.filters import ProjectId
 from agent_memory_client.models import (
     AckResponse,
     ClientMemoryRecord,
@@ -22,6 +27,7 @@ from agent_memory_client.models import (
     MemoryTypeEnum,
     RecencyConfig,
     SearchModeEnum,
+    WorkingMemory,
     WorkingMemoryResponse,
 )
 
@@ -458,6 +464,339 @@ class TestRecencyConfig:
         assert "text_scorer" not in properties
         assert "search_mode" in properties["min_relevance"]["description"]
         assert "semantic" in properties["min_relevance"]["description"]
+
+
+class TestV1ClientCompatibility:
+    """Tests for the additive V1 scope and token-budget wire fields."""
+
+    def test_working_memory_supports_project_and_agent_scopes(self):
+        memory = WorkingMemory(
+            session_id="session-1",
+            project_id="project-1",
+            agent_id="agent-1",
+        )
+
+        assert memory.project_id == "project-1"
+        assert memory.agent_id == "agent-1"
+        assert memory.model_dump(exclude_none=True)["project_id"] == "project-1"
+        assert memory.model_dump(exclude_none=True)["agent_id"] == "agent-1"
+
+    @pytest.mark.asyncio
+    async def test_search_sends_v1_scope_and_budget_fields(self, enhanced_test_client):
+        with patch.object(enhanced_test_client._client, "post") as mock_post:
+            mock_response = Mock()
+            mock_response.raise_for_status.return_value = None
+            mock_response.json.return_value = {
+                "total": 0,
+                "memories": [],
+                "next_offset": None,
+                "tokens_used": 120,
+                "token_budget": 200,
+                "budget_exhausted": True,
+            }
+            mock_post.return_value = mock_response
+
+            result = await enhanced_test_client.search_long_term_memory(
+                text="archive rules",
+                namespace={"eq": "coding/umony/archive"},
+                project_id=ProjectId(eq="project-1"),
+                agent_id={"eq": "agent-1"},
+                inherit_parents=True,
+                include_shared=True,
+                max_tokens=200,
+                max_results=6,
+            )
+
+            _, kwargs = mock_post.call_args
+            body = kwargs["json"]
+            assert body["project_id"] == {"eq": "project-1"}
+            assert body["agent_id"] == {"eq": "agent-1"}
+            assert body["inherit_parents"] is True
+            assert body["include_shared"] is True
+            assert body["max_tokens"] == 200
+            assert body["max_results"] == 6
+            assert result.tokens_used == 120
+            assert result.token_budget == 200
+            assert result.budget_exhausted is True
+
+    def test_old_search_response_keeps_optional_budget_metadata_empty(self):
+        result = MemoryRecordResults(total=0, memories=[])
+
+        assert result.tokens_used is None
+        assert result.token_budget is None
+        assert result.budget_exhausted is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("field_name", "value"),
+        [("max_tokens", 0), ("max_results", -1)],
+    )
+    async def test_search_rejects_non_positive_budget_limits(
+        self, enhanced_test_client, field_name, value
+    ):
+        with pytest.raises(
+            ValueError, match=f"{field_name} must be a positive integer"
+        ):
+            await enhanced_test_client.search_long_term_memory(
+                text="archive rules",
+                **{field_name: value},
+            )
+
+    def test_search_filter_validation_accepts_v1_fields(self, enhanced_test_client):
+        enhanced_test_client.validate_search_filters(
+            project_id=ProjectId(eq="project-1"),
+            agent_id={"eq": "agent-1"},
+            inherit_parents=True,
+            include_shared=True,
+            max_tokens=200,
+            max_results=6,
+        )
+
+    @pytest.mark.asyncio
+    async def test_memory_prompt_sends_session_scopes_and_keeps_search_options(
+        self, enhanced_test_client
+    ):
+        with patch.object(enhanced_test_client._client, "post") as mock_post:
+            mock_response = Mock()
+            mock_response.raise_for_status.return_value = None
+            mock_response.json.return_value = {"messages": []}
+            mock_post.return_value = mock_response
+            search_options = {
+                "inherit_parents": True,
+                "max_tokens": 300,
+                "max_results": 4,
+            }
+
+            await enhanced_test_client.memory_prompt(
+                query="What do we know?",
+                session_id="session-1",
+                project_id="project-1",
+                agent_id="agent-1",
+                long_term_search=search_options,
+            )
+
+            _, kwargs = mock_post.call_args
+            assert kwargs["json"]["session"]["project_id"] == "project-1"
+            assert kwargs["json"]["session"]["agent_id"] == "agent-1"
+            assert kwargs["json"]["long_term_search"] == {
+                "inherit_parents": True,
+                "max_tokens": 300,
+                "max_results": 4,
+                "namespace": {"eq": "test-namespace"},
+                "project_id": {"eq": "project-1"},
+                "agent_id": {"eq": "agent-1"},
+            }
+
+    @pytest.mark.asyncio
+    async def test_memory_prompt_sends_scopes_to_search_without_session(
+        self, enhanced_test_client
+    ):
+        with patch.object(enhanced_test_client._client, "post") as mock_post:
+            mock_response = Mock()
+            mock_response.raise_for_status.return_value = None
+            mock_response.json.return_value = {"messages": []}
+            mock_post.return_value = mock_response
+
+            await enhanced_test_client.memory_prompt(
+                query="What do we know?",
+                project_id="project-1",
+                agent_id="agent-1",
+                long_term_search={"include_shared": True},
+            )
+
+            _, kwargs = mock_post.call_args
+            assert "session" not in kwargs["json"]
+            assert kwargs["json"]["long_term_search"]["project_id"] == {
+                "eq": "project-1"
+            }
+            assert kwargs["json"]["long_term_search"]["agent_id"] == {"eq": "agent-1"}
+
+    @pytest.mark.asyncio
+    async def test_hydrate_memory_prompt_sends_v1_search_options(
+        self, enhanced_test_client
+    ):
+        with patch.object(enhanced_test_client._client, "post") as mock_post:
+            mock_response = Mock()
+            mock_response.raise_for_status.return_value = None
+            mock_response.json.return_value = {"messages": []}
+            mock_post.return_value = mock_response
+
+            await enhanced_test_client.hydrate_memory_prompt(
+                query="What do we know?",
+                namespace={"eq": "coding/umony/archive"},
+                project_id={"eq": "project-1"},
+                agent_id={"eq": "agent-1"},
+                inherit_parents=True,
+                include_shared=True,
+                max_tokens=300,
+                max_results=4,
+            )
+
+            _, kwargs = mock_post.call_args
+            search = kwargs["json"]["long_term_search"]
+            assert search["project_id"] == {"eq": "project-1"}
+            assert search["agent_id"] == {"eq": "agent-1"}
+            assert search["inherit_parents"] is True
+            assert search["include_shared"] is True
+            assert search["max_tokens"] == 300
+            assert search["max_results"] == 4
+
+
+class TestWorkingMemoryScopeCompatibility:
+    @pytest.mark.asyncio
+    async def test_list_sessions_sends_project_and_agent_identity(
+        self, enhanced_test_client
+    ):
+        mock_response = Mock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"sessions": ["session-1"], "total": 1}
+        enhanced_test_client._client.get.return_value = mock_response
+
+        await enhanced_test_client.list_sessions(
+            project_id="project-1",
+            agent_id="agent-1",
+        )
+
+        enhanced_test_client._client.get.assert_awaited_once_with(
+            "/v1/working-memory/",
+            params={
+                "limit": "20",
+                "offset": "0",
+                "namespace": "test-namespace",
+                "project_id": "project-1",
+                "agent_id": "agent-1",
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_working_memory_sends_project_and_agent_identity(
+        self, enhanced_test_client
+    ):
+        mock_response = Mock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = WorkingMemoryResponse(
+            session_id="session-1",
+            project_id="project-1",
+            agent_id="agent-1",
+        ).model_dump(mode="json")
+        enhanced_test_client._client.get.return_value = mock_response
+
+        with pytest.warns(DeprecationWarning):
+            result = await enhanced_test_client.get_working_memory(
+                session_id="session-1",
+                project_id="project-1",
+                agent_id="agent-1",
+            )
+
+        _, kwargs = enhanced_test_client._client.get.call_args
+        assert kwargs["params"]["project_id"] == "project-1"
+        assert kwargs["params"]["agent_id"] == "agent-1"
+        assert result.project_id == "project-1"
+        assert result.agent_id == "agent-1"
+
+    @pytest.mark.asyncio
+    async def test_get_or_create_stores_project_and_agent_identity(
+        self, enhanced_test_client
+    ):
+        created_memory = WorkingMemoryResponse(
+            session_id="session-1",
+            project_id="project-1",
+            agent_id="agent-1",
+        )
+
+        with (
+            patch.object(
+                enhanced_test_client,
+                "get_working_memory",
+                side_effect=MemoryNotFoundError("not found"),
+            ) as mock_get,
+            patch.object(
+                enhanced_test_client,
+                "put_working_memory",
+                return_value=created_memory,
+            ) as mock_put,
+        ):
+            created, result = await enhanced_test_client.get_or_create_working_memory(
+                session_id="session-1",
+                project_id="project-1",
+                agent_id="agent-1",
+            )
+
+        assert created is True
+        assert result == created_memory
+        assert mock_get.call_args.kwargs["project_id"] == "project-1"
+        assert mock_get.call_args.kwargs["agent_id"] == "agent-1"
+        body = mock_put.call_args.kwargs["memory"]
+        assert body.project_id == "project-1"
+        assert body.agent_id == "agent-1"
+
+    @pytest.mark.asyncio
+    async def test_delete_working_memory_sends_project_and_agent_identity(
+        self, enhanced_test_client
+    ):
+        mock_response = Mock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"status": "ok"}
+        enhanced_test_client._client.delete.return_value = mock_response
+
+        await enhanced_test_client.delete_working_memory(
+            session_id="session-1",
+            project_id="project-1",
+            agent_id="agent-1",
+        )
+
+        _, kwargs = enhanced_test_client._client.delete.call_args
+        assert kwargs["params"]["project_id"] == "project-1"
+        assert kwargs["params"]["agent_id"] == "agent-1"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "helper_name",
+        ["get_working_memory_tool", "get_or_create_working_memory_tool"],
+    )
+    async def test_working_memory_tool_helpers_forward_identity(
+        self, enhanced_test_client, helper_name
+    ):
+        memory = WorkingMemoryResponse(
+            session_id="session-1",
+            project_id="project-1",
+            agent_id="agent-1",
+        )
+        with patch.object(
+            enhanced_test_client,
+            "get_or_create_working_memory",
+            return_value=(False, memory),
+        ) as mock_get:
+            helper = getattr(enhanced_test_client, helper_name)
+            await helper(
+                session_id="session-1",
+                project_id="project-1",
+                agent_id="agent-1",
+            )
+
+        assert mock_get.call_args.kwargs["project_id"] == "project-1"
+        assert mock_get.call_args.kwargs["agent_id"] == "agent-1"
+
+    @pytest.mark.asyncio
+    async def test_function_call_helper_forwards_working_memory_identity(
+        self, enhanced_test_client
+    ):
+        with patch.object(
+            enhanced_test_client,
+            "get_or_create_working_memory_tool",
+            return_value={"summary": "found"},
+        ) as mock_get:
+            result = await enhanced_test_client.resolve_function_call(
+                function_name="get_or_create_working_memory",
+                function_arguments={},
+                session_id="session-1",
+                project_id="project-1",
+                agent_id="agent-1",
+            )
+
+        assert result["success"] is True
+        assert mock_get.call_args.kwargs["project_id"] == "project-1"
+        assert mock_get.call_args.kwargs["agent_id"] == "agent-1"
 
 
 class TestClientSideValidation:

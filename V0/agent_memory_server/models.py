@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_valid
 from ulid import ULID
 
 from agent_memory_server.filters import (
+    AgentId,
     CreatedAt,
     Entities,
     EventDate,
@@ -20,10 +21,16 @@ from agent_memory_server.filters import (
     LastAccessed,
     MemoryType,
     Namespace,
+    ProjectId,
     SessionId,
     Topics,
     UserId,
 )
+from agent_memory_server.namespaces import (
+    expand_namespace_parents,
+    normalize_namespace,
+)
+from agent_memory_server.scopes import SHARED_SCOPE, with_shared_scope
 from agent_memory_server.utils.tag_codec import validate_no_commas_in_tags
 
 
@@ -267,6 +274,14 @@ class MemoryRecord(BaseModel):
         default=None,
         description="Optional user ID for the memory record",
     )
+    project_id: str | None = Field(
+        default=None,
+        description="Optional project ID for the memory record",
+    )
+    agent_id: str | None = Field(
+        default=None,
+        description="Optional agent ID for the memory record",
+    )
     namespace: str | None = Field(
         default=None,
         description="Optional namespace for the memory record",
@@ -337,6 +352,20 @@ class MemoryRecord(BaseModel):
         description="Additional non-indexed metadata for provenance and display",
     )
 
+    @field_validator("namespace", mode="after")
+    @classmethod
+    def normalize_namespace_path(cls, value: str | None) -> str | None:
+        return normalize_namespace(value) if value is not None else None
+
+    @field_validator("project_id", "user_id", "agent_id", "session_id", mode="after")
+    @classmethod
+    def reject_internal_shared_scope(cls, value: str | None) -> str | None:
+        if value == SHARED_SCOPE:
+            raise ValueError(f"{SHARED_SCOPE} is reserved for internal storage")
+        if value is not None and "," in value:
+            raise ValueError("scope IDs must not contain commas")
+        return value
+
     @field_validator("topics", "entities", "extracted_from", mode="after")
     @classmethod
     def reject_commas_in_tags(cls, v: list[str] | None, info) -> list[str] | None:
@@ -387,6 +416,14 @@ class WorkingMemory(BaseModel):
         default=None,
         description="Optional user ID for the working memory",
     )
+    project_id: str | None = Field(
+        default=None,
+        description="Optional project ID for the working memory",
+    )
+    agent_id: str | None = Field(
+        default=None,
+        description="Optional agent ID for the working memory",
+    )
     tokens: int = Field(
         default=0,
         description="Optional number of tokens in the working memory",
@@ -400,6 +437,15 @@ class WorkingMemory(BaseModel):
         default_factory=MemoryStrategyConfig,
         description="Configuration for memory extraction strategy when promoting to long-term memory",
     )
+
+    @field_validator("project_id", "user_id", "agent_id", "session_id", mode="after")
+    @classmethod
+    def reject_internal_shared_scope(cls, value: str | None) -> str | None:
+        if value == SHARED_SCOPE:
+            raise ValueError(f"{SHARED_SCOPE} is reserved for internal storage")
+        if value is not None and "," in value:
+            raise ValueError("scope IDs must not contain commas")
+        return value
 
     # TTL and timestamps
     ttl_seconds: int | None = Field(
@@ -418,6 +464,11 @@ class WorkingMemory(BaseModel):
         default_factory=lambda: datetime.now(UTC),
         description="Datetime when the working memory was last updated",
     )
+
+    @field_validator("namespace", mode="after")
+    @classmethod
+    def normalize_namespace_path(cls, value: str | None) -> str | None:
+        return normalize_namespace(value) if value is not None else None
 
     def get_create_long_term_memory_tool_description(self) -> str:
         """
@@ -558,6 +609,14 @@ class UpdateWorkingMemory(BaseModel):
         default=None,
         description="Optional user ID for the working memory",
     )
+    project_id: str | None = Field(
+        default=None,
+        description="Optional project ID for the working memory",
+    )
+    agent_id: str | None = Field(
+        default=None,
+        description="Optional agent ID for the working memory",
+    )
     tokens: int = Field(
         default=0,
         description="Optional number of tokens in the working memory",
@@ -589,6 +648,20 @@ class UpdateWorkingMemory(BaseModel):
         description="Datetime when the working memory was last updated",
     )
 
+    @field_validator("namespace", mode="after")
+    @classmethod
+    def normalize_namespace_path(cls, value: str | None) -> str | None:
+        return normalize_namespace(value) if value is not None else None
+
+    @field_validator("project_id", "user_id", "agent_id", mode="after")
+    @classmethod
+    def reject_internal_shared_scope(cls, value: str | None) -> str | None:
+        if value == SHARED_SCOPE:
+            raise ValueError(f"{SHARED_SCOPE} is reserved for internal storage")
+        if value is not None and "," in value:
+            raise ValueError("scope IDs must not contain commas")
+        return value
+
     @model_validator(mode="after")
     def validate_memories_not_empty(self) -> "UpdateWorkingMemory":
         """Validate that no memories have empty text or id."""
@@ -608,6 +681,8 @@ class UpdateWorkingMemory(BaseModel):
             data=self.data,
             context=self.context,
             user_id=self.user_id,
+            project_id=self.project_id,
+            agent_id=self.agent_id,
             tokens=self.tokens,
             namespace=self.namespace,
             long_term_memory_strategy=self.long_term_memory_strategy,
@@ -637,12 +712,19 @@ class WorkingMemoryRequest(BaseModel):
     session_id: str
     namespace: str | None = None
     user_id: str | None = None
+    project_id: str | None = None
+    agent_id: str | None = None
     model_name: ModelNameLiteral | None = None
     context_window_max: int | None = None
     long_term_memory_strategy: MemoryStrategyConfig | None = Field(
         default=None,
         description="Configuration for memory extraction strategy when promoting to long-term memory",
     )
+
+    @field_validator("namespace", mode="after")
+    @classmethod
+    def normalize_namespace_path(cls, value: str | None) -> str | None:
+        return normalize_namespace(value) if value is not None else None
 
 
 class AckResponse(BaseModel):
@@ -671,10 +753,78 @@ class MemoryRecordResults(BaseModel):
     memories: list[MemoryRecordResult]
     total: int
     next_offset: int | None = None
+    tokens_used: int | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    token_budget: int | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    budget_exhausted: bool | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class MemoryRecordResultsResponse(MemoryRecordResults):
     """Response containing memory search results"""
+
+
+class MemoryGraphNode(BaseModel):
+    """One item shown in the human memory graph."""
+
+    id: str
+    kind: Literal["memory", "project", "namespace", "topic", "entity"]
+    label: str
+    value: str | None = None
+    count: int = Field(default=1, ge=1)
+    project_id: str | None = None
+    project_label: str | None = None
+    memory: MemoryRecord | None = None
+
+
+class MemoryGraphEdge(BaseModel):
+    """One checked relationship shown in the human memory graph."""
+
+    id: str
+    source: str
+    target: str
+    kind: Literal[
+        "belongs_to",
+        "inside",
+        "tagged",
+        "mentions",
+        "derived_from",
+    ]
+
+
+class MemoryGraphFacet(BaseModel):
+    """One filter choice and the number of matching memories."""
+
+    value: str
+    label: str
+    count: int = Field(ge=1)
+    field: Literal["project_id", "namespace", "memory_type", "agent_id"] | None = None
+    separator: Literal["/", "."] | None = None
+
+
+class MemoryGraphFacets(BaseModel):
+    """Filter choices shown above the memory graph."""
+
+    projects: list[MemoryGraphFacet] = Field(default_factory=list)
+    namespaces: list[MemoryGraphFacet] = Field(default_factory=list)
+    memory_types: list[MemoryGraphFacet] = Field(default_factory=list)
+    agents: list[MemoryGraphFacet] = Field(default_factory=list)
+
+
+class MemoryGraphResponse(BaseModel):
+    """Ready-to-draw graph data for the human memory browser."""
+
+    nodes: list[MemoryGraphNode]
+    edges: list[MemoryGraphEdge]
+    facets: MemoryGraphFacets
+    memory_count: int = Field(ge=0)
+    result_limit: int = Field(ge=1)
+    truncated: bool = False
+    facets_truncated: bool = False
 
 
 class CreateMemoryRecordRequest(BaseModel):
@@ -704,6 +854,8 @@ class GetSessionsQuery(BaseModel):
     offset: int = Field(default=0, ge=0)
     namespace: str | None = None
     user_id: str | None = None
+    project_id: str | None = None
+    agent_id: str | None = None
 
 
 class HealthCheckResponse(BaseModel):
@@ -714,6 +866,8 @@ class HealthCheckResponse(BaseModel):
 
 class SearchRequest(BaseModel):
     """Payload for long-term memory search"""
+
+    _token_prefix: str = PrivateAttr(default="")
 
     text: str | None = Field(
         default=None,
@@ -748,6 +902,10 @@ class SearchRequest(BaseModel):
         default=None,
         description="Optional namespace to filter by",
     )
+    inherit_parents: bool = Field(
+        default=False,
+        description="Include the exact parent namespace paths",
+    )
     topics: Topics | None = Field(
         default=None,
         description="Optional topics to filter by",
@@ -767,6 +925,14 @@ class SearchRequest(BaseModel):
     user_id: UserId | None = Field(
         default=None,
         description="Optional user ID to filter by",
+    )
+    project_id: ProjectId | None = Field(
+        default=None,
+        description="Optional project ID to filter by",
+    )
+    agent_id: AgentId | None = Field(
+        default=None,
+        description="Optional agent ID to filter by",
     )
     distance_threshold: float | None = Field(
         default=None,
@@ -789,6 +955,21 @@ class SearchRequest(BaseModel):
         ge=1,
         le=100,
         description="Optional limit on the number of results",
+    )
+    max_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional hard token budget for returned memories",
+    )
+    max_results: int | None = Field(
+        default=None,
+        ge=1,
+        le=100,
+        description="Optional safety cap used with token-budget retrieval",
+    )
+    include_shared: bool = Field(
+        default=False,
+        description="Include null shared values for each private scope dimension",
     )
     offset: int = Field(
         default=0,
@@ -830,15 +1011,56 @@ class SearchRequest(BaseModel):
         description="If true, attempt server-side recency-aware re-ranking when supported by backend",
     )
 
+    @model_validator(mode="after")
+    def normalize_namespace_filter(self) -> "SearchRequest":
+        if self.include_shared:
+            for field_name in (
+                "project_id",
+                "user_id",
+                "agent_id",
+                "session_id",
+            ):
+                scope_filter = getattr(self, field_name)
+                if scope_filter is not None and (
+                    scope_filter.eq is None and scope_filter.any is None
+                ):
+                    raise ValueError(
+                        "include_shared supports exact or any private scope filters only"
+                    )
+
+        if self.namespace is None:
+            if self.inherit_parents:
+                raise ValueError("inherit_parents requires an exact namespace")
+            return self
+
+        for field_name in ("eq", "ne", "startswith"):
+            value = getattr(self.namespace, field_name)
+            if value is not None:
+                setattr(self.namespace, field_name, normalize_namespace(value))
+
+        for field_name in ("any", "all", "not_in"):
+            values = getattr(self.namespace, field_name)
+            if values is not None:
+                setattr(
+                    self.namespace,
+                    field_name,
+                    [normalize_namespace(value) for value in values],
+                )
+
+        if self.inherit_parents and self.namespace.eq is None:
+            raise ValueError("inherit_parents requires an exact namespace")
+        return self
+
     def get_filters(self):
         """Get all filter objects as a dictionary"""
         filters = {}
 
-        if self.session_id is not None:
-            filters["session_id"] = self.session_id
-
         if self.namespace is not None:
-            filters["namespace"] = self.namespace
+            filters["namespace"] = (
+                Namespace(any=expand_namespace_parents(self.namespace.eq))
+                if self.inherit_parents and self.namespace.eq is not None
+                else self.namespace
+            )
 
         if self.topics is not None:
             filters["topics"] = self.topics
@@ -846,8 +1068,18 @@ class SearchRequest(BaseModel):
         if self.entities is not None:
             filters["entities"] = self.entities
 
-        if self.user_id is not None:
-            filters["user_id"] = self.user_id
+        for field_name, filter_type in (
+            ("project_id", ProjectId),
+            ("user_id", UserId),
+            ("agent_id", AgentId),
+            ("session_id", SessionId),
+        ):
+            scope_filter = getattr(self, field_name)
+            filters[field_name] = (
+                with_shared_scope(scope_filter, filter_type)
+                if self.include_shared
+                else scope_filter or filter_type(eq=SHARED_SCOPE)
+            )
 
         if self.created_at is not None:
             filters["created_at"] = self.created_at
@@ -889,6 +1121,15 @@ class UserMessage(base.Message):
 class MemoryPromptResponse(BaseModel):
     messages: list[base.Message | SystemMessage]
     long_term_memories: list["MemoryRecordResult"] | None = None
+    tokens_used: int | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    token_budget: int | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    budget_exhausted: bool | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class LenientMemoryRecord(ExtractedMemoryRecord):
@@ -936,6 +1177,12 @@ class EditMemoryRecordRequest(BaseModel):
     user_id: str | None = Field(
         default=None, description="Updated user ID for the memory"
     )
+    project_id: str | None = Field(
+        default=None, description="Updated project ID for the memory"
+    )
+    agent_id: str | None = Field(
+        default=None, description="Updated agent ID for the memory"
+    )
     session_id: str | None = Field(
         default=None, description="Updated session ID for the memory"
     )
@@ -947,10 +1194,31 @@ class EditMemoryRecordRequest(BaseModel):
         description="Whether this memory is pinned and should not be auto-deleted",
     )
 
+    @field_validator("text", mode="after")
+    @classmethod
+    def reject_blank_text(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("Memory text cannot be empty")
+        return value
+
     @field_validator("topics", "entities", mode="after")
     @classmethod
     def reject_commas_in_tags(cls, v: list[str] | None, info) -> list[str] | None:
         return validate_no_commas_in_tags(v, info.field_name)
+
+    @field_validator("namespace", mode="after")
+    @classmethod
+    def normalize_namespace_path(cls, value: str | None) -> str | None:
+        return normalize_namespace(value) if value is not None else None
+
+    @field_validator("project_id", "user_id", "agent_id", "session_id", mode="after")
+    @classmethod
+    def reject_internal_shared_scope(cls, value: str | None) -> str | None:
+        if value == SHARED_SCOPE:
+            raise ValueError(f"{SHARED_SCOPE} is reserved for internal storage")
+        if value is not None and "," in value:
+            raise ValueError("scope IDs must not contain commas")
+        return value
 
 
 class TaskStatusEnum(str, Enum):

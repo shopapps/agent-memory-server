@@ -92,7 +92,8 @@ class TestMemoryEndpoints:
     async def test_list_sessions_with_sessions(self, client, session):
         """Test the list_sessions endpoint with a session"""
         response = await client.get(
-            "/v1/working-memory/?offset=0&limit=10&namespace=test-namespace"
+            "/v1/working-memory/?offset=0&limit=10"
+            "&namespace=test-namespace&user_id=test-user"
         )
         assert response.status_code == 200
 
@@ -1610,6 +1611,82 @@ class TestLongTermMemoryEndpoint:
         mock_update.assert_awaited_once_with(
             "memory-1", {"text": "Updated memory", "pinned": False}
         )
+
+
+class TestLongTermMemoryScopeEdits:
+    @pytest.mark.asyncio
+    async def test_patch_long_term_memory_allows_project_and_agent_scope(self, client):
+        mock_settings = Settings(long_term_memory=True)
+        updated_memory = MemoryRecordResult(
+            id="memory-1",
+            text="Scoped memory",
+            project_id="project-a",
+            agent_id="agent-a",
+            dist=0.0,
+        )
+
+        with (
+            patch("agent_memory_server.api.settings", mock_settings),
+            patch(
+                "agent_memory_server.api.long_term_memory.update_long_term_memory",
+                new=AsyncMock(return_value=updated_memory),
+            ) as mock_update,
+        ):
+            response = await client.patch(
+                "/v1/long-term-memory/memory-1",
+                json={"project_id": "project-a", "agent_id": "agent-a"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["project_id"] == "project-a"
+        assert response.json()["agent_id"] == "agent-a"
+        mock_update.assert_awaited_once_with(
+            "memory-1", {"project_id": "project-a", "agent_id": "agent-a"}
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["project_id", "agent_id"])
+    async def test_patch_long_term_memory_rejects_internal_shared_scope(
+        self, client, field
+    ):
+        mock_settings = Settings(long_term_memory=True)
+
+        with (
+            patch("agent_memory_server.api.settings", mock_settings),
+            patch(
+                "agent_memory_server.api.long_term_memory.update_long_term_memory",
+                new=AsyncMock(),
+            ) as mock_update,
+        ):
+            response = await client.patch(
+                "/v1/long-term-memory/memory-1",
+                json={field: "__shared__"},
+            )
+
+        assert response.status_code == 422
+        assert "reserved for internal storage" in response.text
+        mock_update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_patch_long_term_memory_rejects_blank_text(client):
+    mock_settings = Settings(long_term_memory=True)
+
+    with (
+        patch("agent_memory_server.api.settings", mock_settings),
+        patch(
+            "agent_memory_server.api.long_term_memory.update_long_term_memory",
+            new=AsyncMock(),
+        ) as mock_update,
+    ):
+        response = await client.patch(
+            "/v1/long-term-memory/memory-1",
+            json={"text": "   "},
+        )
+
+    assert response.status_code == 422
+    assert "Memory text cannot be empty" in response.text
+    mock_update.assert_not_awaited()
 
 
 class TestDeprecationHeader:

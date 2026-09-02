@@ -25,12 +25,14 @@ from .exceptions import (
     MemoryValidationError,
 )
 from .filters import (
+    AgentId,
     CreatedAt,
     Entities,
     ExtractionStrategy,
     LastAccessed,
     MemoryType,
     Namespace,
+    ProjectId,
     SessionId,
     Topics,
     UserId,
@@ -218,6 +220,8 @@ class MemoryAPIClient:
         offset: int = 0,
         namespace: str | None = None,
         user_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
     ) -> SessionListResponse:
         """
         List available sessions with optional pagination and namespace filtering.
@@ -227,6 +231,8 @@ class MemoryAPIClient:
             offset: Offset for pagination (default: 0)
             namespace: Optional namespace filter
             user_id: Optional user ID filter
+            project_id: Optional project ID filter
+            agent_id: Optional agent ID filter
 
         Returns:
             SessionListResponse containing session IDs and total count
@@ -242,6 +248,10 @@ class MemoryAPIClient:
 
         if user_id is not None:
             params["user_id"] = user_id
+        if project_id is not None:
+            params["project_id"] = project_id
+        if agent_id is not None:
+            params["agent_id"] = agent_id
 
         try:
             response = await self._client.get("/v1/working-memory/", params=params)
@@ -257,6 +267,8 @@ class MemoryAPIClient:
         namespace: str | None = None,
         model_name: ModelNameLiteral | None = None,
         context_window_max: int | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
     ) -> WorkingMemoryResponse:
         """
         Get working memory for a session, including messages and context.
@@ -272,6 +284,8 @@ class MemoryAPIClient:
             namespace: Optional namespace for the session
             model_name: Optional model name to determine context window size
             context_window_max: Optional direct specification of context window tokens
+            project_id: Optional project ID for the session
+            agent_id: Optional agent ID for the session
 
         Returns:
             WorkingMemoryResponse containing messages, context and metadata
@@ -293,6 +307,10 @@ class MemoryAPIClient:
 
         if user_id is not None:
             params["user_id"] = user_id
+        if project_id is not None:
+            params["project_id"] = project_id
+        if agent_id is not None:
+            params["agent_id"] = agent_id
 
         if namespace is not None:
             params["namespace"] = namespace
@@ -333,6 +351,8 @@ class MemoryAPIClient:
         model_name: ModelNameLiteral | None = None,
         context_window_max: int | None = None,
         long_term_memory_strategy: MemoryStrategyConfig | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
     ) -> tuple[bool, WorkingMemory]:
         """
         Get working memory for a session, creating it if it doesn't exist.
@@ -349,6 +369,8 @@ class MemoryAPIClient:
             context_window_max: Optional direct specification of context window tokens
             long_term_memory_strategy: Optional strategy configuration for memory extraction
                 when promoting to long-term memory
+            project_id: Optional project ID for the session
+            agent_id: Optional agent ID for the session
 
         Returns:
             Tuple of (created: bool, memory: WorkingMemory)
@@ -383,12 +405,19 @@ class MemoryAPIClient:
         """
         try:
             # Try to get existing working memory first
+            get_kwargs: dict[str, Any] = {
+                "session_id": session_id,
+                "user_id": user_id,
+                "namespace": namespace,
+                "model_name": model_name,
+                "context_window_max": context_window_max,
+            }
+            if project_id is not None:
+                get_kwargs["project_id"] = project_id
+            if agent_id is not None:
+                get_kwargs["agent_id"] = agent_id
             existing_memory = await self.get_working_memory(
-                session_id=session_id,
-                user_id=user_id,
-                namespace=namespace,
-                model_name=model_name,
-                context_window_max=context_window_max,
+                **get_kwargs,
             )
 
             # Check if this is an unsaved session (deprecated behavior for old clients)
@@ -401,6 +430,8 @@ class MemoryAPIClient:
                     memories=[],
                     data={},
                     user_id=user_id,
+                    project_id=project_id,
+                    agent_id=agent_id,
                     long_term_memory_strategy=long_term_memory_strategy
                     or MemoryStrategyConfig(),
                 )
@@ -433,6 +464,8 @@ class MemoryAPIClient:
                     memories=[],
                     data={},
                     user_id=user_id,
+                    project_id=project_id,
+                    agent_id=agent_id,
                     long_term_memory_strategy=long_term_memory_strategy
                     or MemoryStrategyConfig(),
                 )
@@ -505,7 +538,12 @@ class MemoryAPIClient:
             self._handle_http_error(e.response)
 
     async def delete_working_memory(
-        self, session_id: str, namespace: str | None = None, user_id: str | None = None
+        self,
+        session_id: str,
+        namespace: str | None = None,
+        user_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
     ) -> AckResponse:
         """
         Delete working memory for a session.
@@ -514,6 +552,8 @@ class MemoryAPIClient:
             session_id: The session ID to delete memory for
             namespace: Optional namespace for the session
             user_id: Optional user ID for the session
+            project_id: Optional project ID for the session
+            agent_id: Optional agent ID for the session
 
         Returns:
             AckResponse indicating success
@@ -526,6 +566,10 @@ class MemoryAPIClient:
 
         if user_id is not None:
             params["user_id"] = user_id
+        if project_id is not None:
+            params["project_id"] = project_id
+        if agent_id is not None:
+            params["agent_id"] = agent_id
 
         try:
             response = await self._client.delete(
@@ -1054,6 +1098,12 @@ class MemoryAPIClient:
         limit: int = 10,
         offset: int = 0,
         optimize_query: bool = False,
+        project_id: ProjectId | dict[str, Any] | None = None,
+        agent_id: AgentId | dict[str, Any] | None = None,
+        inherit_parents: bool = False,
+        max_tokens: int | None = None,
+        max_results: int | None = None,
+        include_shared: bool = False,
     ) -> MemoryRecordResults:
         """
         Search long-term memories using semantic, keyword, or hybrid search.
@@ -1076,6 +1126,12 @@ class MemoryAPIClient:
             limit: Maximum number of results to return (default: 10)
             offset: Offset for pagination (default: 0)
             optimize_query: Whether to optimize the query for semantic (vector) search using a fast model; ignored for keyword and hybrid modes (default: False)
+            project_id: Optional project ID filter
+            agent_id: Optional agent ID filter
+            inherit_parents: Include exact parent namespace paths (default: False)
+            max_tokens: Optional positive token budget for returned memory content
+            max_results: Optional positive safety cap for returned memories
+            include_shared: Include shared null-scope memories (default: False)
 
         Returns:
             MemoryRecordResults with matching memories and metadata
@@ -1101,6 +1157,15 @@ class MemoryAPIClient:
                 logging.info(f"- {memory.text[:100]}... (distance: {memory.dist})")
             ```
         """
+        for field_name, value in (
+            ("max_tokens", max_tokens),
+            ("max_results", max_results),
+        ):
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value <= 0
+            ):
+                raise ValueError(f"{field_name} must be a positive integer")
+
         # Convert dictionary filters to their proper filter objects if needed
         if isinstance(session_id, dict):
             session_id = SessionId(**session_id)
@@ -1114,6 +1179,10 @@ class MemoryAPIClient:
             created_at = CreatedAt(**created_at)
         if isinstance(last_accessed, dict):
             last_accessed = LastAccessed(**last_accessed)
+        if isinstance(project_id, dict):
+            project_id = ProjectId(**project_id)
+        if isinstance(agent_id, dict):
+            agent_id = AgentId(**agent_id)
         if isinstance(memory_type, dict):
             memory_type = MemoryType(**memory_type)
         if isinstance(extraction_strategy, dict):
@@ -1151,6 +1220,18 @@ class MemoryAPIClient:
                 payload["user_id"] = user_id
             else:
                 payload["user_id"] = user_id.model_dump(exclude_none=True)
+        if project_id:
+            payload["project_id"] = project_id.model_dump(exclude_none=True)
+        if agent_id:
+            payload["agent_id"] = agent_id.model_dump(exclude_none=True)
+        if inherit_parents:
+            payload["inherit_parents"] = True
+        if include_shared:
+            payload["include_shared"] = True
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        if max_results is not None:
+            payload["max_results"] = max_results
         if memory_type:
             payload["memory_type"] = memory_type.model_dump(exclude_none=True)
         if extraction_strategy:
@@ -1469,6 +1550,8 @@ class MemoryAPIClient:
         session_id: str,
         namespace: str | None = None,
         user_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
     ) -> dict[str, Any]:
         """
         Get current working memory state formatted for LLM consumption.
@@ -1480,6 +1563,8 @@ class MemoryAPIClient:
             session_id: The session ID to get memory for
             namespace: Optional namespace for the session
             user_id: Optional user ID for the session
+            project_id: Optional project ID for the session
+            agent_id: Optional agent ID for the session
 
         Returns:
             Dict with formatted working memory information
@@ -1497,11 +1582,16 @@ class MemoryAPIClient:
             ```
         """
         try:
-            created, result = await self.get_or_create_working_memory(
-                session_id=session_id,
-                namespace=namespace or self.config.default_namespace,
-                user_id=user_id,
-            )
+            get_kwargs: dict[str, Any] = {
+                "session_id": session_id,
+                "namespace": namespace or self.config.default_namespace,
+                "user_id": user_id,
+            }
+            if project_id is not None:
+                get_kwargs["project_id"] = project_id
+            if agent_id is not None:
+                get_kwargs["agent_id"] = agent_id
+            created, result = await self.get_or_create_working_memory(**get_kwargs)
 
             # Format for LLM consumption
             message_count = len(result.messages) if result.messages else 0
@@ -1548,6 +1638,8 @@ class MemoryAPIClient:
         namespace: str | None = None,
         user_id: str | None = None,
         long_term_memory_strategy: MemoryStrategyConfig | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
     ) -> dict[str, Any]:
         """
         Get or create working memory state formatted for LLM consumption.
@@ -1562,6 +1654,8 @@ class MemoryAPIClient:
             user_id: Optional user ID for the session
             long_term_memory_strategy: Optional strategy configuration for memory extraction
                 when promoting to long-term memory
+            project_id: Optional project ID for the session
+            agent_id: Optional agent ID for the session
 
         Returns:
             Dict with formatted working memory information and creation status
@@ -1592,12 +1686,17 @@ class MemoryAPIClient:
             ```
         """
         try:
-            created, result = await self.get_or_create_working_memory(
-                session_id=session_id,
-                namespace=namespace or self.config.default_namespace,
-                user_id=user_id,
-                long_term_memory_strategy=long_term_memory_strategy,
-            )
+            get_kwargs: dict[str, Any] = {
+                "session_id": session_id,
+                "namespace": namespace or self.config.default_namespace,
+                "user_id": user_id,
+                "long_term_memory_strategy": long_term_memory_strategy,
+            }
+            if project_id is not None:
+                get_kwargs["project_id"] = project_id
+            if agent_id is not None:
+                get_kwargs["agent_id"] = agent_id
+            created, result = await self.get_or_create_working_memory(**get_kwargs)
 
             # Format for LLM consumption
             message_count = len(result.messages) if result.messages else 0
@@ -2426,6 +2525,8 @@ class MemoryAPIClient:
         session_id: str,
         namespace: str | None = None,
         user_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
     ) -> ToolCallResolutionResult:
         """
         Resolve a tool call from any LLM provider format.
@@ -2438,6 +2539,8 @@ class MemoryAPIClient:
             tool_call: Tool call in any supported format
             session_id: Session ID for working memory operations
             namespace: Optional namespace for operations
+            project_id: Optional project ID for working memory operations
+            agent_id: Optional agent ID for working memory operations
 
         Returns:
             ToolCallResolutionResult with standardized response format
@@ -2467,6 +2570,8 @@ class MemoryAPIClient:
                 session_id=session_id,
                 namespace=namespace,
                 user_id=user_id,
+                project_id=project_id,
+                agent_id=agent_id,
             )
 
         except Exception as e:
@@ -2484,6 +2589,8 @@ class MemoryAPIClient:
         session_id: str,
         namespace: str | None = None,
         user_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
     ) -> Sequence[ToolCallResolutionResult]:
         """
         Resolve multiple tool calls from any LLM provider format.
@@ -2493,6 +2600,8 @@ class MemoryAPIClient:
             session_id: Session ID for working memory operations
             namespace: Optional namespace for operations
             user_id: Optional user ID for operations
+            project_id: Optional project ID for working memory operations
+            agent_id: Optional agent ID for working memory operations
 
         Returns:
             List of ToolCallResolutionResult objects in the same order as input
@@ -2517,6 +2626,8 @@ class MemoryAPIClient:
                 session_id=session_id,
                 namespace=namespace,
                 user_id=user_id,
+                project_id=project_id,
+                agent_id=agent_id,
             )
             results.append(result)
 
@@ -2529,6 +2640,8 @@ class MemoryAPIClient:
         session_id: str,
         namespace: str | None = None,
         user_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
     ) -> ToolCallResolutionResult:
         """
         Resolve a function call for memory-related tools.
@@ -2542,6 +2655,8 @@ class MemoryAPIClient:
             function_arguments: JSON string or dict of function arguments
             session_id: Session ID for working memory operations
             namespace: Optional namespace for operations
+            project_id: Optional project ID for working memory operations
+            agent_id: Optional agent ID for working memory operations
 
         Returns:
             Dict with standardized response format:
@@ -2598,12 +2713,20 @@ class MemoryAPIClient:
             elif function_name == "get_working_memory":
                 # Keep backward compatibility for deprecated method
                 result = await self._resolve_get_working_memory(
-                    session_id, effective_namespace, user_id
+                    session_id,
+                    effective_namespace,
+                    user_id,
+                    project_id,
+                    agent_id,
                 )
 
             elif function_name == "get_or_create_working_memory":
                 result = await self._resolve_get_or_create_working_memory(
-                    session_id, effective_namespace, user_id
+                    session_id,
+                    effective_namespace,
+                    user_id,
+                    project_id,
+                    agent_id,
                 )
 
             elif function_name in (
@@ -2711,23 +2834,37 @@ class MemoryAPIClient:
         )
 
     async def _resolve_get_working_memory(
-        self, session_id: str, namespace: str | None, user_id: str | None = None
+        self,
+        session_id: str,
+        namespace: str | None,
+        user_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
     ) -> dict[str, Any]:
         """Resolve get_working_memory (deprecated) function call."""
         return await self.get_working_memory_tool(
             session_id=session_id,
             namespace=namespace,
             user_id=user_id,
+            project_id=project_id,
+            agent_id=agent_id,
         )
 
     async def _resolve_get_or_create_working_memory(
-        self, session_id: str, namespace: str | None, user_id: str | None = None
+        self,
+        session_id: str,
+        namespace: str | None,
+        user_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
     ) -> dict[str, Any]:
         """Resolve get_or_create_working_memory function call."""
         result = await self.get_or_create_working_memory_tool(
             session_id=session_id,
             namespace=namespace,
             user_id=user_id,
+            project_id=project_id,
+            agent_id=agent_id,
         )
         return result
 
@@ -2894,6 +3031,8 @@ class MemoryAPIClient:
         session_id: str,
         namespace: str | None = None,
         user_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
     ) -> Sequence[ToolCallResolutionResult]:
         """
         Resolve multiple function calls in batch.
@@ -2903,6 +3042,8 @@ class MemoryAPIClient:
             session_id: Session ID for working memory operations
             namespace: Optional namespace for operations
             user_id: Optional user ID for operations
+            project_id: Optional project ID for working memory operations
+            agent_id: Optional agent ID for working memory operations
 
         Returns:
             List of resolution results in the same order as input
@@ -2932,6 +3073,8 @@ class MemoryAPIClient:
                 session_id=session_id,
                 namespace=namespace,
                 user_id=user_id,
+                project_id=project_id,
+                agent_id=agent_id,
             )
             results.append(result)
 
@@ -3120,8 +3263,14 @@ class MemoryAPIClient:
             "created_at",
             "last_accessed",
             "user_id",
+            "project_id",
+            "agent_id",
+            "inherit_parents",
+            "include_shared",
             "distance_threshold",
             "memory_type",
+            "max_tokens",
+            "max_results",
             "limit",
             "offset",
         }
@@ -3139,6 +3288,14 @@ class MemoryAPIClient:
             not isinstance(filters["offset"], int) or filters["offset"] < 0
         ):
             raise MemoryValidationError("Offset must be a non-negative integer")
+
+        for field_name in ("max_tokens", "max_results"):
+            if field_name in filters and (
+                not isinstance(filters[field_name], int)
+                or isinstance(filters[field_name], bool)
+                or filters[field_name] <= 0
+            ):
+                raise MemoryValidationError(f"{field_name} must be a positive integer")
 
         if "distance_threshold" in filters and (
             not isinstance(filters["distance_threshold"], int | float)
@@ -3297,6 +3454,8 @@ class MemoryAPIClient:
         long_term_search: dict[str, Any] | None = None,
         user_id: str | None = None,
         optimize_query: bool = False,
+        project_id: str | None = None,
+        agent_id: str | None = None,
     ) -> dict[str, Any]:
         """
         Hydrate a user query with memory context and return a prompt ready to send to an LLM.
@@ -3312,6 +3471,8 @@ class MemoryAPIClient:
             long_term_search: Optional search parameters for long-term memory
             user_id: Optional user ID for the session
             optimize_query: Whether to optimize the query for semantic (vector) search using a fast model; ignored for keyword and hybrid modes (default: False)
+            project_id: Optional project ID for the working-memory session
+            agent_id: Optional agent ID for the working-memory session
 
         Returns:
             Dict with messages hydrated with relevant memory context
@@ -3355,6 +3516,10 @@ class MemoryAPIClient:
                 session_params["context_window_max"] = str(effective_context_window_max)
             if user_id is not None:
                 session_params["user_id"] = user_id
+            if project_id is not None:
+                session_params["project_id"] = project_id
+            if agent_id is not None:
+                session_params["agent_id"] = agent_id
             payload["session"] = session_params
 
         # Add long-term search parameters if provided
@@ -3366,6 +3531,10 @@ class MemoryAPIClient:
                     long_term_search["namespace"] = {
                         "eq": self.config.default_namespace
                     }
+            if project_id is not None and "project_id" not in long_term_search:
+                long_term_search["project_id"] = {"eq": project_id}
+            if agent_id is not None and "agent_id" not in long_term_search:
+                long_term_search["agent_id"] = {"eq": agent_id}
             payload["long_term_search"] = long_term_search
 
         # Add optimize_query as query parameter
@@ -3412,6 +3581,12 @@ class MemoryAPIClient:
         recency_half_life_last_access_days: float | None = None,
         recency_half_life_created_days: float | None = None,
         server_side_recency: bool | None = None,
+        project_id: dict[str, Any] | None = None,
+        agent_id: dict[str, Any] | None = None,
+        inherit_parents: bool = False,
+        include_shared: bool = False,
+        max_tokens: int | None = None,
+        max_results: int | None = None,
     ) -> dict[str, Any]:
         """
         Hydrate a user query with long-term memory context using filters.
@@ -3445,6 +3620,12 @@ class MemoryAPIClient:
             recency_half_life_last_access_days: Half-life (days) for last_accessed decay
             recency_half_life_created_days: Half-life (days) for created_at decay
             server_side_recency: If true, attempt server-side recency-aware re-ranking
+            project_id: Optional project ID filter (as dict)
+            agent_id: Optional agent ID filter (as dict)
+            inherit_parents: Include exact parent namespace paths (default: False)
+            include_shared: Include shared null-scope memories (default: False)
+            max_tokens: Optional positive token budget for returned memory content
+            max_results: Optional positive safety cap for returned memories
 
         Returns:
             Dict with messages hydrated with relevant long-term memories
@@ -3468,6 +3649,18 @@ class MemoryAPIClient:
             long_term_search["last_accessed"] = last_accessed
         if user_id is not None:
             long_term_search["user_id"] = user_id
+        if project_id is not None:
+            long_term_search["project_id"] = project_id
+        if agent_id is not None:
+            long_term_search["agent_id"] = agent_id
+        if inherit_parents:
+            long_term_search["inherit_parents"] = True
+        if include_shared:
+            long_term_search["include_shared"] = True
+        if max_tokens is not None:
+            long_term_search["max_tokens"] = max_tokens
+        if max_results is not None:
+            long_term_search["max_results"] = max_results
         if distance_threshold is not None:
             long_term_search["distance_threshold"] = distance_threshold
         if memory_type is not None:

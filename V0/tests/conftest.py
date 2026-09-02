@@ -15,6 +15,7 @@ from httpx import ASGITransport, AsyncClient
 from redis.asyncio import Redis as AsyncRedis
 from testcontainers.compose import DockerCompose
 
+from agent_memory_server.admin_graph import router as admin_graph_router
 from agent_memory_server.api import router as memory_router
 from agent_memory_server.config import settings
 from agent_memory_server.dependencies import HybridBackgroundTasks
@@ -27,6 +28,7 @@ from agent_memory_server.models import (
     MemoryRecordResult,
     MemoryRecordResults,
 )
+from agent_memory_server.scopes import encode_scope
 
 # Import the module to access its global for resetting
 from agent_memory_server.utils import redis as redis_utils_module
@@ -508,6 +510,7 @@ def app(use_test_redis_connection):
     # Include routers
     app.include_router(health_router)
     app.include_router(memory_router)
+    app.include_router(admin_graph_router)
 
     return app
 
@@ -520,6 +523,7 @@ def app_with_mock_background_tasks(use_test_redis_connection):
     # Include routers
     app.include_router(health_router)
     app.include_router(memory_router)
+    app.include_router(admin_graph_router)
 
     # Override the get_redis_conn function to return the test Redis connection
     async def mock_get_redis_conn(*args, **kwargs):
@@ -651,6 +655,17 @@ class MockMemoryVectorDatabase(MemoryVectorDatabase):
         self.memories: dict[str, MemoryRecord] = {}
         self.embeddings = MockEmbeddings()
 
+    @staticmethod
+    def _scope_matches(value: str | None, scope_filter: Any) -> bool:
+        if not scope_filter:
+            return True
+        stored_value = encode_scope(value)
+        if getattr(scope_filter, "eq", None) is not None:
+            return stored_value == scope_filter.eq
+        if getattr(scope_filter, "any", None) is not None:
+            return stored_value in scope_filter.any
+        return True
+
     async def add_memories(self, memories: list[MemoryRecord]) -> list[str]:
         """Add memories to the mock store."""
         ids = []
@@ -667,6 +682,8 @@ class MockMemoryVectorDatabase(MemoryVectorDatabase):
         text_scorer: str = "BM25STD",
         session_id: Any = None,
         user_id: Any = None,
+        project_id: Any = None,
+        agent_id: Any = None,
         namespace: Any = None,
         created_at: Any = None,
         last_accessed: Any = None,
@@ -695,19 +712,13 @@ class MockMemoryVectorDatabase(MemoryVectorDatabase):
                 and memory.namespace != namespace.eq
             ):
                 continue
-            if (
-                user_id
-                and hasattr(user_id, "eq")
-                and user_id.eq
-                and memory.user_id != user_id.eq
-            ):
+            if not self._scope_matches(memory.user_id, user_id):
                 continue
-            if (
-                session_id
-                and hasattr(session_id, "eq")
-                and session_id.eq
-                and memory.session_id != session_id.eq
-            ):
+            if not self._scope_matches(memory.project_id, project_id):
+                continue
+            if not self._scope_matches(memory.agent_id, agent_id):
+                continue
+            if not self._scope_matches(memory.session_id, session_id):
                 continue
             if (
                 memory_hash
@@ -740,6 +751,8 @@ class MockMemoryVectorDatabase(MemoryVectorDatabase):
                 updated_at=memory.updated_at or datetime.now(UTC),
                 last_accessed=memory.last_accessed or datetime.now(UTC),
                 user_id=memory.user_id,
+                project_id=memory.project_id,
+                agent_id=memory.agent_id,
                 session_id=memory.session_id,
                 namespace=memory.namespace,
                 topics=memory.topics or [],
@@ -786,6 +799,8 @@ class MockMemoryVectorDatabase(MemoryVectorDatabase):
         self,
         namespace: str | None = None,
         user_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
         session_id: str | None = None,
     ) -> int:
         """Count memories in the mock store."""
@@ -794,6 +809,10 @@ class MockMemoryVectorDatabase(MemoryVectorDatabase):
             if namespace and memory.namespace != namespace:
                 continue
             if user_id and memory.user_id != user_id:
+                continue
+            if project_id and memory.project_id != project_id:
+                continue
+            if agent_id and memory.agent_id != agent_id:
                 continue
             if session_id and memory.session_id != session_id:
                 continue
@@ -804,6 +823,8 @@ class MockMemoryVectorDatabase(MemoryVectorDatabase):
         self,
         session_id: Any = None,
         user_id: Any = None,
+        project_id: Any = None,
+        agent_id: Any = None,
         namespace: Any = None,
         created_at: Any = None,
         last_accessed: Any = None,
@@ -829,19 +850,13 @@ class MockMemoryVectorDatabase(MemoryVectorDatabase):
                 and memory.namespace != namespace.eq
             ):
                 continue
-            if (
-                user_id
-                and hasattr(user_id, "eq")
-                and user_id.eq
-                and memory.user_id != user_id.eq
-            ):
+            if not self._scope_matches(memory.user_id, user_id):
                 continue
-            if (
-                session_id
-                and hasattr(session_id, "eq")
-                and session_id.eq
-                and memory.session_id != session_id.eq
-            ):
+            if not self._scope_matches(memory.project_id, project_id):
+                continue
+            if not self._scope_matches(memory.agent_id, agent_id):
+                continue
+            if not self._scope_matches(memory.session_id, session_id):
                 continue
             if (
                 memory_hash
@@ -876,6 +891,8 @@ class MockMemoryVectorDatabase(MemoryVectorDatabase):
                 updated_at=memory.updated_at or datetime.now(UTC),
                 last_accessed=memory.last_accessed or datetime.now(UTC),
                 user_id=memory.user_id,
+                project_id=memory.project_id,
+                agent_id=memory.agent_id,
                 session_id=memory.session_id,
                 namespace=memory.namespace,
                 topics=memory.topics or [],

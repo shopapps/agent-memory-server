@@ -52,6 +52,26 @@ class UserId(BaseFilter):
     startswith: str | None = None
 
 
+class ProjectId(BaseFilter):
+    """Filter by project ID"""
+
+    eq: str | None = None
+    in_: list[str] | None = None
+    not_eq: str | None = None
+    not_in: list[str] | None = None
+    startswith: str | None = None
+
+
+class AgentId(BaseFilter):
+    """Filter by agent ID"""
+
+    eq: str | None = None
+    in_: list[str] | None = None
+    not_eq: str | None = None
+    not_in: list[str] | None = None
+    startswith: str | None = None
+
+
 class Topics(BaseFilter):
     """Filter by topics"""
 

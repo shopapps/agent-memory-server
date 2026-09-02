@@ -26,7 +26,9 @@ def generate_memory_hash(memory: MemoryRecord) -> str:
     # This ensures merged memories with same content have the same hash
     content_fields = {
         "text": memory.text,
+        "project_id": memory.project_id,
         "user_id": memory.user_id,
+        "agent_id": memory.agent_id,
         "session_id": memory.session_id,
         "namespace": memory.namespace,
         "memory_type": memory.memory_type,
@@ -41,6 +43,8 @@ def generate_memory_hash_from_fields(
     session_id: str | None,
     namespace: str | None,
     memory_type: str,
+    project_id: str | None = None,
+    agent_id: str | None = None,
 ) -> str:
     """
     Generate a memory hash directly from field values without creating a memory object.
@@ -59,7 +63,9 @@ def generate_memory_hash_from_fields(
     """
     content_fields = {
         "text": text,
+        "project_id": project_id,
         "user_id": user_id,
+        "agent_id": agent_id,
         "session_id": session_id,
         "namespace": namespace,
         "memory_type": memory_type,
@@ -84,12 +90,22 @@ def update_memory_hash_if_text_changed(memory: MemoryRecord, updates: dict) -> d
     """
     result_updates = dict(updates)
 
-    # If text was updated, regenerate the hash efficiently
-    if "text" in updates:
+    hash_fields = {
+        "text",
+        "project_id",
+        "user_id",
+        "agent_id",
+        "session_id",
+        "namespace",
+        "memory_type",
+    }
+    if hash_fields.intersection(updates):
         # Use efficient field-based hashing instead of creating temporary object
         result_updates["memory_hash"] = generate_memory_hash_from_fields(
             text=updates.get("text", memory.text),
+            project_id=updates.get("project_id", memory.project_id),
             user_id=updates.get("user_id", memory.user_id),
+            agent_id=updates.get("agent_id", memory.agent_id),
             session_id=updates.get("session_id", memory.session_id),
             namespace=updates.get("namespace", memory.namespace),
             memory_type=updates.get("memory_type", memory.memory_type),

@@ -12,9 +12,11 @@ from redisvl.index import AsyncSearchIndex
 from redisvl.schema import IndexSchema
 
 from agent_memory_server.config import settings
+from agent_memory_server.utils.search_index import index_field_names
 
 
 logger = logging.getLogger(__name__)
+_REQUIRED_SCOPE_FIELDS = {"project_id", "agent_id"}
 
 
 def _get_working_memory_index_schema() -> IndexSchema:
@@ -48,6 +50,18 @@ def _get_working_memory_index_schema() -> IndexSchema:
                     "name": "user_id",
                     "type": "tag",
                     "path": "$.user_id",
+                    "attrs": {"sortable": True},
+                },
+                {
+                    "name": "project_id",
+                    "type": "tag",
+                    "path": "$.project_id",
+                    "attrs": {"sortable": True},
+                },
+                {
+                    "name": "agent_id",
+                    "type": "tag",
+                    "path": "$.agent_id",
                     "attrs": {"sortable": True},
                 },
                 {
@@ -102,8 +116,32 @@ async def ensure_working_memory_index(redis_client: Redis) -> bool:
     try:
         # Check if index already exists
         if await index.exists():
-            logger.info(f"Working memory index '{index_name}' already exists")
-            return False
+            info = await redis_client.ft(index_name).info()
+            missing_fields = _REQUIRED_SCOPE_FIELDS - index_field_names(info)
+            if not missing_fields:
+                logger.info(f"Working memory index '{index_name}' already exists")
+                return False
+
+            logger.info(
+                "Rebuilding working memory index '%s' to add fields: %s",
+                index_name,
+                ", ".join(sorted(missing_fields)),
+            )
+            try:
+                await index.create(overwrite=True, drop=False)
+            except Exception:
+                current_info = await redis_client.ft(index_name).info()
+                current_missing = _REQUIRED_SCOPE_FIELDS - index_field_names(
+                    current_info
+                )
+                if current_missing:
+                    raise
+                logger.info(
+                    "Another process completed working memory index '%s' upgrade",
+                    index_name,
+                )
+                return False
+            return True
 
         # Create the index
         await index.create(overwrite=False)

@@ -20,6 +20,23 @@ logger = logging.getLogger(__name__)
 
 JSONTypes = str | float | int | bool | list[Any] | dict[str, Any] | None
 
+
+def _normalize_namespace(namespace: str) -> str:
+    """Return the canonical form of a slash-separated namespace path."""
+    if not isinstance(namespace, str):
+        raise ValueError("namespace must be a string")
+    if "," in namespace:
+        raise ValueError("namespace must not contain commas")
+    if namespace.startswith("/") or namespace.endswith("/"):
+        raise ValueError("namespace cannot start or end with a slash")
+
+    parts = [part.strip() for part in namespace.split("/")]
+    if not parts or any(not part or part in {".", ".."} for part in parts):
+        raise ValueError("namespace contains an empty or unsafe path segment")
+
+    return "/".join(parts)
+
+
 # Model name literals for model-specific window sizes
 ModelNameLiteral = Literal[
     "gpt-3.5-turbo",
@@ -198,6 +215,14 @@ class MemoryRecord(BaseModel):
         default=None,
         description="Optional user ID for the memory record",
     )
+    project_id: str | None = Field(
+        default=None,
+        description="Optional project ID for the memory record",
+    )
+    agent_id: str | None = Field(
+        default=None,
+        description="Optional agent ID for the memory record",
+    )
     namespace: str | None = Field(
         default=None,
         description="Optional namespace for the memory record",
@@ -259,6 +284,20 @@ class MemoryRecord(BaseModel):
         description="Additional non-indexed metadata for provenance and display",
     )
 
+    @field_validator("namespace", mode="after")
+    @classmethod
+    def normalize_namespace_path(cls, value: str | None) -> str | None:
+        return _normalize_namespace(value) if value is not None else None
+
+    @field_validator("project_id", "user_id", "agent_id", "session_id", mode="after")
+    @classmethod
+    def reject_unsafe_scope_ids(cls, value: str | None) -> str | None:
+        if value == "__shared__":
+            raise ValueError("__shared__ is reserved for internal storage")
+        if value is not None and "," in value:
+            raise ValueError("scope IDs must not contain commas")
+        return value
+
     @field_validator("topics", "entities", "extracted_from", mode="after")
     @classmethod
     def reject_commas_in_tags(cls, v: list[str] | None, info) -> list[str] | None:
@@ -314,6 +353,14 @@ class WorkingMemory(BaseModel):
     user_id: str | None = Field(
         default=None,
         description="Optional user ID for the working memory",
+    )
+    project_id: str | None = Field(
+        default=None,
+        description="Optional project ID for the working memory",
+    )
+    agent_id: str | None = Field(
+        default=None,
+        description="Optional agent ID for the working memory",
     )
     tokens: int = Field(
         default=0,
@@ -433,6 +480,9 @@ class MemoryRecordResults(BaseModel):
     memories: list[MemoryRecordResult]
     total: int
     next_offset: int | None = None
+    tokens_used: int | None = None
+    token_budget: int | None = None
+    budget_exhausted: bool | None = None
 
 
 class MemoryPromptResponse(BaseModel):

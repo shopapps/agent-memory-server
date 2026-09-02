@@ -6,6 +6,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from agent_memory_server import __version__
+from agent_memory_server.admin_graph import router as admin_graph_router
 from agent_memory_server.api import router as memory_router
 from agent_memory_server.auth import verify_auth_config
 from agent_memory_server.config import settings
@@ -128,6 +129,7 @@ app = FastAPI(
 
 app.include_router(health_router)
 app.include_router(memory_router)
+app.include_router(admin_graph_router)
 
 
 def on_start_logger(port: int):

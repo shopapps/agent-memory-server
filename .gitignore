@@ -217,6 +217,8 @@ auth0-test-config.env
 # Virtualenv
 # http://iamzed.com/2009/05/07/a-primer-on-virtualenv/
 [Bb]in
+!/V0/installer/bin/
+!/V0/installer/bin/agent-memory.js
 [Ii]nclude
 [Ll]ib
 [Ll]ib64
@@ -236,6 +238,9 @@ libs/redis/docs/.Trash*
 .omc/
 .omx/
 TASK_MEMORY.md
+
+# Local Beads task database and history
+/.beads/
 *.code-workspace
 /V0/agent-memory-client/agent-memory-client-java/.gradle/
 augment*.md
@@ -246,3 +251,9 @@ dev_docs/
 /V0/package.json
 /V0/package-lock.json
 .gitnexus
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/

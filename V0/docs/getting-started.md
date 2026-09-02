@@ -24,6 +24,14 @@ uv sync
 
 The easiest way to start the worker, REST API server, and MCP server is to use Docker Compose. See the Docker Compose section below for more details.
 
+For the managed Mac setup, run `./ams docker:install` from the repository root.
+It runs the first setup when needed, builds the current source, and replaces
+the app containers while keeping the Redis memory database. The safe start,
+restart, and reset commands are listed in the
+[local install guide](../../INSTALL.md#run-the-current-source-in-docker).
+The same guide has [simple agent prompts and Codex checks](../../INSTALL.md#use-shared-memory-in-agent-tasks)
+for saving, recalling, and automatically using project memory.
+
 But you can also run these components via the CLI commands. Here's how you
 run the REST API server:
 
@@ -50,6 +58,32 @@ uv run agent-memory mcp --mode streamable-http --port 9000
 # SSE mode for production (use Docket backend)
 uv run agent-memory mcp --mode sse --task-backend docket
 ```
+
+### Review memories in the graph
+
+After the API starts, open
+[http://127.0.0.1:8000/admin/memories/graph](http://127.0.0.1:8000/admin/memories/graph).
+
+The page can filter by project, namespace, memory type, and agent. Drag to move
+around, scroll to zoom, and click a node to read or edit the full memory.
+Project, namespace, topic, and entity details include links to the memories
+connected to that node. Topic and Entity tags in a memory panel jump to the
+matching node. Larger nodes have more links or longer memory text.
+Coloured halos make node groups easier to see.
+Browsing uses filter and keyword searches only, so it does not call an AI
+model. Saving an edit rebuilds the memory's search embedding and may use the
+configured embedding provider.
+
+Use **Delete** in a memory panel to remove that memory. The page asks for
+confirmation first. Deletion cannot be undone, still works for pinned memories,
+and does not delete related memories or use AI credits.
+
+The built-in graph is for local use. The local Docker quickstart sets
+`DISABLE_AUTH=true` and binds the service to the current Mac only. Do not expose
+that setup to a network. With API authentication enabled, the graph page and
+data also require authentication, but the page has no sign-in screen. A shared
+deployment needs a trusted web proxy or another browser login layer that sends
+the supported bearer token. Give delete access only to trusted users.
 
 ### Core CLI Commands
 

@@ -107,6 +107,7 @@ class TestMCP:
                 },
             )
             assert isinstance(prompt, CallToolResult)
+            assert not prompt.isError, prompt.content
 
             assert prompt.content[0].type == "text"
             messages = json.loads(prompt.content[0].text)
@@ -155,6 +156,7 @@ class TestMCP:
                 },
             )
             assert isinstance(prompt, CallToolResult)
+            assert not prompt.isError, prompt.content
 
             # Parse the response content - ensure we're getting text content
             assert prompt.content[0].type == "text"
@@ -264,8 +266,14 @@ class TestMCP:
                     "namespace": {"eq": "test-namespace"},
                     "topics": {"any": ["test-topic"]},
                     "entities": {"any": ["test-entity"]},
+                    "project_id": {"eq": "project-a"},
+                    "agent_id": {"eq": "agent-a"},
                     "search_mode": "hybrid",
                     "limit": 5,
+                    "max_tokens": 100,
+                    "max_results": 3,
+                    "inherit_parents": True,
+                    "include_shared": True,
                 },
             )
 
@@ -279,6 +287,8 @@ class TestMCP:
             assert captured_params["session"] is not None
             assert captured_params["session"].session_id == session
             assert captured_params["session"].namespace == "test-namespace"
+            assert captured_params["session"].project_id == "project-a"
+            assert captured_params["session"].agent_id == "agent-a"
 
             # Verify long_term_search parameters were passed correctly
             assert captured_params["long_term_search"] is not None
@@ -286,12 +296,55 @@ class TestMCP:
             assert captured_params["long_term_search"].limit == 5
             assert captured_params["long_term_search"].topics is not None
             assert captured_params["long_term_search"].entities is not None
+            assert captured_params["long_term_search"].project_id.eq == "project-a"
+            assert captured_params["long_term_search"].agent_id.eq == "agent-a"
+            assert captured_params["long_term_search"].max_tokens == 100
+            assert captured_params["long_term_search"].max_results == 3
+            assert captured_params["long_term_search"].inherit_parents is True
+            assert captured_params["long_term_search"].include_shared is True
 
             # Verify search_mode was forwarded (hybrid_alpha and text_scorer
             # are server-level config, not exposed to LLMs)
             assert (
                 captured_params["long_term_search"].search_mode == SearchModeEnum.HYBRID
             )
+
+    @pytest.mark.asyncio
+    async def test_memory_prompt_long_term_search_uses_exact_current_session_scope(
+        self, monkeypatch
+    ):
+        captured_params = {}
+
+        async def mock_core_memory_prompt(
+            params: MemoryPromptRequest, background_tasks, optimize_query: bool = False
+        ):
+            captured_params["params"] = params
+            return MemoryPromptResponse(messages=[])
+
+        monkeypatch.setattr(
+            "agent_memory_server.mcp.core_memory_prompt", mock_core_memory_prompt
+        )
+
+        async with client_session(mcp_app._mcp_server) as client:
+            result = await client.call_tool(
+                "memory_prompt",
+                {
+                    "query": "Test query",
+                    "session_id": {"eq": "session-a"},
+                    "project_id": {"eq": "project-a"},
+                    "user_id": {"eq": "user-a"},
+                    "agent_id": {"eq": "agent-a"},
+                    "include_shared": True,
+                },
+            )
+
+        assert not result.isError, result.content
+        search = captured_params["params"].long_term_search
+        filters = search.get_filters()
+        assert filters["session_id"].any == ["session-a", "__shared__"]
+        assert filters["project_id"].any == ["project-a", "__shared__"]
+        assert filters["user_id"].any == ["user-a", "__shared__"]
+        assert filters["agent_id"].any == ["agent-a", "__shared__"]
 
     @pytest.mark.asyncio
     async def test_memory_prompt_session_only_mode(self, session, monkeypatch):
@@ -420,6 +473,8 @@ class TestMCP:
                             }
                         ],
                         "namespace": "test-namespace",
+                        "project_id": "project-a",
+                        "agent_id": "agent-a",
                     },
                 )
 
@@ -442,6 +497,10 @@ class TestMCP:
                 assert memory.topics == ["preferences", "ui"]
                 assert memory.id == "pref_dark_mode"
                 assert memory.persisted_at is None  # Pending promotion
+                assert memory.project_id == "project-a"
+                assert memory.agent_id == "agent-a"
+                assert working_memory.project_id == "project-a"
+                assert working_memory.agent_id == "agent-a"
 
     @pytest.mark.asyncio
     async def test_set_working_memory_with_json_data(self, mcp_test_setup):
@@ -597,6 +656,79 @@ class TestMCP:
                 # The optimize_query parameter should be passed separately
                 optimize_query = call_args[1]["optimize_query"]
                 assert optimize_query is False
+
+    @pytest.mark.asyncio
+    async def test_search_long_term_memory_passes_v1_fields_and_budget_metadata(
+        self, mcp_test_setup
+    ):
+        async with client_session(mcp_app._mcp_server) as client:
+            with mock.patch(
+                "agent_memory_server.mcp.core_search_long_term_memory"
+            ) as mock_search:
+                mock_search.return_value = MemoryRecordResults(
+                    total=1,
+                    memories=[
+                        MemoryRecordResult(
+                            id="memory-1",
+                            text="Scoped memory",
+                            dist=0.1,
+                            project_id="project-a",
+                            agent_id="agent-a",
+                            namespace="work/code",
+                        )
+                    ],
+                    tokens_used=7,
+                    token_budget=20,
+                    budget_exhausted=True,
+                )
+
+                result = await client.call_tool(
+                    "search_long_term_memory",
+                    {
+                        "text": "scoped",
+                        "project_id": {"eq": "project-a"},
+                        "agent_id": {"eq": "agent-a"},
+                        "namespace": {"eq": "work/code"},
+                        "inherit_parents": True,
+                        "include_shared": True,
+                        "max_tokens": 20,
+                        "max_results": 4,
+                    },
+                )
+
+                assert not result.isError, result.content
+                payload = mock_search.await_args.args[0]
+                assert payload.project_id.eq == "project-a"
+                assert payload.agent_id.eq == "agent-a"
+                assert payload.inherit_parents is True
+                assert payload.include_shared is True
+                assert payload.max_tokens == 20
+                assert payload.max_results == 4
+
+                response = json.loads(result.content[0].text)
+                assert response["tokens_used"] == 7
+                assert response["token_budget"] == 20
+                assert response["budget_exhausted"] is True
+
+    @pytest.mark.asyncio
+    async def test_search_without_a_budget_keeps_the_old_mcp_shape(
+        self, mcp_test_setup
+    ):
+        async with client_session(mcp_app._mcp_server) as client:
+            with mock.patch(
+                "agent_memory_server.mcp.core_search_long_term_memory"
+            ) as mock_search:
+                mock_search.return_value = MemoryRecordResults(total=0, memories=[])
+
+                result = await client.call_tool(
+                    "search_long_term_memory", {"text": "old call"}
+                )
+
+                assert not result.isError, result.content
+                response = json.loads(result.content[0].text)
+                assert "tokens_used" not in response
+                assert "token_budget" not in response
+                assert "budget_exhausted" not in response
 
     @pytest.mark.asyncio
     async def test_search_long_term_memory_with_optimize_query_true_explicit(
@@ -783,7 +915,7 @@ class TestMCP:
                 )
 
     @pytest.mark.asyncio
-    async def test_edit_long_term_memory_allows_pinned(self, mcp_test_setup):
+    async def test_edit_long_term_memory_allows_pinned(self):
         """Test the MCP edit_long_term_memory tool passes pinned updates through."""
         async with client_session(mcp_app._mcp_server) as client:
             with mock.patch(
@@ -800,7 +932,12 @@ class TestMCP:
 
                 result = await client.call_tool(
                     "edit_long_term_memory",
-                    {"memory_id": "memory-1", "pinned": True},
+                    {
+                        "memory_id": "memory-1",
+                        "project_id": "project-a",
+                        "agent_id": "agent-a",
+                        "pinned": True,
+                    },
                 )
 
                 assert isinstance(result, CallToolResult)
@@ -808,3 +945,21 @@ class TestMCP:
                 call_args = mock_update.await_args
                 assert call_args.kwargs["memory_id"] == "memory-1"
                 assert call_args.kwargs["updates"].pinned is True
+                assert call_args.kwargs["updates"].project_id == "project-a"
+                assert call_args.kwargs["updates"].agent_id == "agent-a"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["project_id", "agent_id"])
+    async def test_edit_long_term_memory_rejects_internal_shared_scope(self, field):
+        async with client_session(mcp_app._mcp_server) as client:
+            with mock.patch(
+                "agent_memory_server.mcp.core_update_long_term_memory"
+            ) as mock_update:
+                result = await client.call_tool(
+                    "edit_long_term_memory",
+                    {"memory_id": "memory-1", field: "__shared__"},
+                )
+
+                assert result.isError
+                assert "reserved for internal storage" in str(result.content)
+                mock_update.assert_not_awaited()

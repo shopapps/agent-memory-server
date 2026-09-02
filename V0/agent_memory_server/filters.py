@@ -293,6 +293,14 @@ class UserId(TagFilter):
     field: str = "user_id"
 
 
+class ProjectId(TagFilter):
+    field: str = "project_id"
+
+
+class AgentId(TagFilter):
+    field: str = "agent_id"
+
+
 class Namespace(TagFilter):
     field: str = "namespace"
 

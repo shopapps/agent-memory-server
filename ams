@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+AMS_REPOSITORY_ROOT="$(
+  cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+  pwd -P
+)"
+export AMS_CLI_NAME="./ams"
+
+exec node \
+  "$AMS_REPOSITORY_ROOT/V0/installer/bin/agent-memory.js" \
+  "$@"

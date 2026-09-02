@@ -217,6 +217,8 @@ class TestWorkingMemoryStorageWithStrategy:
         ) as mock_get_redis:
             mock_redis = MagicMock()
             mock_redis.expire = AsyncMock()
+            mock_redis.delete = AsyncMock()
+            mock_redis.type = AsyncMock(return_value="none")
             mock_redis.zadd = AsyncMock(
                 side_effect=AssertionError(
                     "Deprecated sessions zset writes should not be used"
