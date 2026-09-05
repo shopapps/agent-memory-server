@@ -1,5 +1,116 @@
 # Working Memory
 
+## Automatic agent capture
+
+The Shopapps fork adds an optional **Working Memory** capture stage for Codex
+and Claude. It keeps up to 30 recent exchanges per session for seven days,
+then filters suggested project facts for review or opt-in automatic promotion.
+The review page is `/admin/working-memory`. Raw chat stays out of the long-term
+graph. See [installation, limits, privacy and tests](../../INSTALL.md#working-memory).
+
+Opening the page directly auto-fills the installer user ID for the default
+local, auth-disabled setup. The ID is still required to select recent chats;
+it is not a login ID. A `user_id` in the link takes priority, and links to and
+from the graph preserve it. The API token is separate: it is needed only for
+server access checks, is not an OpenAI key, and is not saved by the page.
+See [finding the ID and local auto-fill](../../INSTALL.md#local-user-id-and-api-token).
+
+The managed installer passes `WORKING_MEMORY_LOCAL_USER_ID` through its
+existing `runtime.env`; no host settings files are exposed to the container.
+Without that value, a directly connected local server checks the local Codex
+and Claude settings for a single matching ID. Remote URLs and auth-enabled
+servers do not auto-fill an installer identity. Login subjects such as
+`local-dev-user` or `token-user` are not capture IDs and are never substituted.
+
+This stage uses the existing Redis JSON working-memory store, with its own
+`working-memory` namespace and exact local-user/project/session scope. It does
+not change the generic PUT behaviour below. Capture uses append/update events,
+stable turn IDs, whole-turn trimming and TTL expiry; it does not generate a new
+summary of evicted chat or index all messages, even if the generic message-indexing option
+is enabled. Suggested facts are held in `data.capture.candidates` until saved,
+dismissed, trimmed with their source message, or expired.
+
+With `WORKING_MEMORY_HANDOFF_ENABLED=true` (default false), trimming can keep
+up to six earlier user-backed suggestions as **handoff excerpts**, within
+4,000 JSON characters. No extra model is called. They are not durable facts.
+Each entry expires seven days from the original message; source changes and
+private events retract its excerpt. The normal session expiry also applies.
+Disabling the option hides old handoffs. It does not reconstruct dropped chat.
+
+Session detail exposes `memory.data.capture.handoff` entries with `id`, `text`,
+`evidence`, `message_id`, `source_role`, `source_created_at`, and `expires_at`.
+Activity includes `handoff_count`. Recall puts these under a distinct
+`handoff` object with `kind: "untrusted user-evidenced excerpts"` and `items`,
+within the existing recent-context size limit. The decision endpoint accepts
+`dismiss` for an excerpt ID; it cannot promote an excerpt. The page provides
+**Forget excerpt**. See [handoff setup](../../INSTALL.md#keep-a-small-handoff-from-a-longer-chat).
+
+Capture API routes (all use the existing API authentication):
+
+| Route | Purpose |
+| --- | --- |
+| `POST /v1/working-memory-capture/events` | Capture one user/assistant event |
+| `GET /v1/working-memory-capture/sessions` | List up to 50 recent sessions for an exact user, optionally a project |
+| `POST /v1/working-memory-capture/session` | Read one exact capture scope |
+| `GET /v1/working-memory-capture/recall` | Bounded recent history; optional `include_long_term=true` adds saved project facts |
+| `POST /v1/working-memory-capture/recall` | Read relevant saved facts for a captured user prompt; prompt text stays out of access-log URLs |
+| `POST /v1/working-memory-capture/process` | Queue filtering or retry a failed filter |
+| `POST /v1/working-memory-capture/decision` | Promote or dismiss a suggested fact |
+
+Capture is quick and does not call a model. Final replies queue `process_capture`
+through the existing background-task system. Filtering sends only unprocessed,
+non-omitted messages to the configured model; source quotes are checked before
+candidates are accepted. Processing merges into the current document without
+overwriting new messages or restoring an expired session. Long-term writes
+use deterministic project-and-text IDs and the normal index/embedding path.
+The filter is an aid, not a guarantee that an AI-generated fact is true.
+
+Each processing job checks one exchange and saves up to three eligible facts.
+It queues the remaining work rather than leaving a fourth fact waiting for
+another prompt. The standard Docket worker retries failures three times with
+30-second delays. Assistant-only evidence needs review unless the same quote
+appears in a user message. Shared records keep source role/date/category and
+review type, but not the private source quote.
+
+Session detail and list responses include `counts` and last captured, checked,
+saved and recalled times. These describe the retained session, not an all-time
+project total. The page refreshes every ten seconds, preserves the chosen
+session, and links saved candidates to the graph. A returned context timestamp
+does not prove that the agent used it: check the memory ID in a new task.
+
+New or updated hooks enable `longTermRecall`. Startup uses a small briefing;
+public prompts use keyword search, with no extra model or embedding request.
+Saved context is quoted JSON with IDs, at most six whole facts and 800 tokens.
+It requires the exact project, permits only the current user or shared user
+scope, and excludes agent/session-private records. Existing configs without
+the option keep their previous recall until updated. Set `longTermRecall` to
+`false` in the installed config to keep only recent-chat recall. Slow or failed
+optional lookups do not undo capture.
+
+The installed hook keeps a private, bounded local retry journal (60 events,
+512 KiB, 24 hours) beside its runner. It retries up to three matching-scope
+events on a later enabled hook run. No background daemon is added. Omitted
+exchanges are removed before disk storage; the queue never contains a token.
+Unknown prompt privacy means its reply is omitted. See the
+[setup and fresh-session checks](../../INSTALL.md#check-that-it-works).
+
+### Filtering usage and allowance
+
+`filter_usage` reports the retained session's filter calls and reported tokens.
+Session detail also returns `daily_filter_usage` for the exact local user and
+project on the current UTC day. Fields include `calls`, `unmeasured_calls`,
+`prompt_tokens`, `completion_tokens`, `total_tokens`, plus daily `date`, `model`
+and `limit`. A failed or unmeasured request is not treated as free.
+
+`WORKING_MEMORY_DAILY_FILTER_TOKEN_LIMIT` defaults to `0` (unlimited). A positive
+number pauses new filtering once reported usage reaches that number. It also
+pauses on unknown usage; already-filtered saves may continue. The last admitted
+call can exceed the threshold. This is not a provider spending cap and excludes
+embeddings and other model work. Counters expire after eight days and contain
+no conversation text. See [setup](../../INSTALL.md#watch-filtering-usage).
+
+## Generic session API
+
 Working memory stores the **current conversation** for a session. It holds messages, tracks context, and automatically summarizes old messages when the conversation gets too long.
 
 ## What Working Memory Does

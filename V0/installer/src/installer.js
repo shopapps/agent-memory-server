@@ -11,6 +11,7 @@ import {
   skillTargetPath,
 } from "./agents.js";
 import { InstallerError } from "./errors.js";
+import { configureWorkingMemory } from "./working-memory.js";
 import {
   defaultProjectNamespace,
   inspectRulesFile,
@@ -56,6 +57,10 @@ export class Installer {
         return this.installRulesOnly(options, command);
       case "rules-uninstall":
         return this.uninstallRulesOnly(options);
+      case "working-memory-install":
+      case "working-memory-update":
+      case "working-memory-uninstall":
+        return this.configureWorkingMemory(options, command.endsWith("uninstall"));
       case "status":
         return this.status();
       case "doctor":
@@ -85,6 +90,28 @@ export class Installer {
     await this.prepareInstallRoot();
     const state = await this.readState(this.paths());
     return Boolean(state && state.phase !== "uninstalled");
+  }
+
+  async configureWorkingMemory(options, uninstall = false) {
+    const result = await configureWorkingMemory({ system: this.system, packageRoot: this.packageRoot,
+      paths: this.paths(), ui: this.ui, options,
+      state: await this.readState(this.paths()), uninstall });
+    if (result.changed && !uninstall) {
+      await this.syncWorkingMemoryUserId();
+      this.ui.info("To load the saved user ID in an existing Docker app, run ./ams docker:restart app.");
+    }
+    return result;
+  }
+
+  async syncWorkingMemoryUserId() {
+    const paths = this.paths();
+    const identityPath = path.join(paths.root, "working-memory-user.json");
+    if (!(await this.system.lstatSafe(identityPath)) || !(await this.system.lstatSafe(paths.runtimeEnv))) return;
+    const identity = JSON.parse(await this.system.readFile(identityPath, "utf8"));
+    if (typeof identity.userId !== "string" || !identity.userId.trim()) return;
+    const existing = await this.system.readFile(paths.runtimeEnv, "utf8");
+    const updated = mergeEnv(existing, { WORKING_MEMORY_LOCAL_USER_ID: identity.userId });
+    if (updated !== existing) await this.system.writeFileAtomic(paths.runtimeEnv, updated, 0o600);
   }
 
   async hasSavedRules() {
@@ -349,6 +376,8 @@ export class Installer {
     await this.writeState(paths, state);
 
     const providerConfigured = await this.hasOpenAiKey(paths);
+    const workingMemory = options.workingMemory
+      ? await this.configureWorkingMemory({ ...options, agents, scope, projectDir }) : null;
     if (!providerConfigured) {
       this.ui.warn("No OpenAI API key is configured. The runtime is ready, but model-backed memory features will fail until a key is added.");
     }
@@ -364,6 +393,7 @@ export class Installer {
       scope,
       ruleFiles: rulesResult.files.map((file) => file.target),
       serverVersion: manifest.serverVersion,
+      workingMemory,
     };
   }
 
@@ -700,6 +730,97 @@ export class Installer {
       }
     }
 
+    // Capture is optional and may have been installed without the full runtime.
+    const projectRoots = new Set([this.system.cwd, state?.projectDir].filter(Boolean));
+    try {
+      const root = await this.system.run("git", ["-C", this.system.cwd, "rev-parse", "--show-toplevel"]);
+      if (root.code === 0 && path.isAbsolute(root.stdout.trim())) projectRoots.add(root.stdout.trim());
+    } catch { /* The current folder need not be a Git repository. */ }
+    let captureFound = false;
+    let captureEnabled = false;
+    for (const client of ["codex", "claude"]) {
+      const folder = client === "codex" ? ".codex" : ".claude";
+      const override = this.system.env[client === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"];
+      const directories = new Map([[path.resolve(override || path.join(this.system.home, folder)), "user"]]);
+      for (const root of projectRoots) directories.set(path.join(root, folder), "project");
+      for (const [directory, scope] of directories) {
+        const configPath = path.join(directory, "ams-working-memory.json");
+        if (!(await this.system.lstatSafe(configPath))) continue;
+        captureFound = true;
+        const name = `${client} Working Memory (${scope})`;
+        let config;
+        try {
+          config = JSON.parse(await this.system.readFile(configPath, "utf8"));
+          if (config?.owner !== "@shopapps/agent-memory/working-memory" || config.client !== client) throw new Error();
+          if (!config.enabled || this.system.env.AMS_WORKING_MEMORY_DISABLED === "1") {
+            checks.push({ name, ok: true, detail: "Capture is off. Existing memories are kept." });
+            continue;
+          }
+          captureEnabled = true;
+          const hooksPath = path.join(directory, client === "codex" ? "hooks.json" : "settings.json");
+          const hooks = JSON.parse(await this.system.readFile(hooksPath, "utf8")).hooks;
+          const installed = typeof config.command === "string" && config.command.length > 0
+            && ["SessionStart", "UserPromptSubmit", "Stop"].every((event) =>
+              Array.isArray(hooks?.[event]) && hooks[event].some((entry) =>
+                Array.isArray(entry.hooks) && entry.hooks.some((hook) => hook.command === config.command)));
+          checks.push({ name: `${name} hooks`, ok: installed,
+            detail: installed ? "All three capture hooks are registered." : "Hooks are missing. Run working-memory update for this client and scope." });
+          const base = new URL(config.apiUrl);
+          if (base.protocol !== "http:" || !["localhost", "127.0.0.1", "[::1]"].includes(base.hostname)
+            || base.username || base.password || base.search || base.hash
+            || typeof config.userId !== "string" || !config.userId.trim()
+            || (config.projectId !== null && config.projectId !== undefined && typeof config.projectId !== "string")) throw new Error();
+        } catch {
+          checks.push({ name, ok: false, detail: "Capture settings or hooks could not be read safely. Run working-memory update." });
+          continue;
+        }
+        try {
+          const url = new URL("/v1/working-memory-capture/sessions", config.apiUrl);
+          url.searchParams.set("user_id", config.userId);
+          if (config.projectId) url.searchParams.set("project_id", config.projectId);
+          const headers = this.system.env.AMS_API_TOKEN ? { Authorization: `Bearer ${this.system.env.AMS_API_TOKEN}` } : {};
+          const response = await this.system.fetch(url, { headers, redirect: "error", signal: AbortSignal.timeout(3000) });
+          if (!response.ok) throw new Error();
+          const data = await response.json();
+          if (!Array.isArray(data.sessions)) throw new Error();
+          const sessions = data.sessions.filter((session) => session.user_id === config.userId && session.client === client
+            && (!config.projectId || session.project_id === config.projectId));
+          if (!sessions.length) {
+            checks.push({ name: `${name} activity`, ok: false, detail: "Hooks installed, but no recent events were received. Start a new agent session in a Git project and send one prompt." });
+            continue;
+          }
+          if (sessions.some((session) => !session.counts)) {
+            checks.push({ name: `${name} activity`, ok: false, detail: "Events exist, but this server does not report processing counts. Update the app to check saving." });
+            continue;
+          }
+          const counts = Object.fromEntries(["captured", "checked", "awaiting_review", "pending_saves", "saved"].map((key) => [key,
+            sessions.reduce((sum, session) => sum + (Number.isSafeInteger(session.counts[key]) && session.counts[key] >= 0 ? session.counts[key] : 0), 0)]));
+          const failed = sessions.some((session) => typeof session.status === "string" && session.status.includes("failed"));
+          const usageUnknown = sessions.some((session) => session.status?.startsWith("filter paused; usage unknown"));
+          const allowanceReached = sessions.some((session) => session.status?.startsWith("filter paused; daily allowance reached"));
+          const outcome = failed ? "Processing failed. Check the provider and use Filter now / retry."
+            : usageUnknown ? "Filtering is paused because provider token usage is unknown. Check the provider before changing the allowance; already-checked facts may still save."
+              : allowanceReached ? "Filtering is paused at the configured daily token allowance. After the next UTC day, use Filter now / retry, or adjust the allowance; already-checked facts may still save."
+                : counts.pending_saves ? "Facts are waiting to save. Check that the worker is running."
+                  : counts.awaiting_review ? "Facts need approval on the Working Memory page."
+                    : counts.saved ? "Facts were saved. A fresh-session search still needs checking."
+                      : "Events received; no lasting facts saved yet. Filtering may still be running or nothing qualified.";
+          const times = ["last_received_at", "last_filtered_at", "last_saved_at"].map((key) => {
+            const dates = sessions.map((session) => session[key]).filter((value) => typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value) && Number.isFinite(Date.parse(value)));
+            const latest = dates.length ? new Date(Math.max(...dates.map(Date.parse))).toISOString() : "not yet";
+            return `${key.replaceAll("_", " ")}: ${latest}`;
+          });
+          checks.push({ name: `${name} activity`, ok: !failed && !usageUnknown,
+            detail: `${outcome} Recent sessions: captured ${counts.captured}, checked ${counts.checked}, saved ${counts.saved}, review ${counts.awaiting_review}, waiting ${counts.pending_saves}. ${times.join("; ")}.` });
+        } catch {
+          checks.push({ name: `${name} activity`, ok: false,
+            detail: "The local capture API could not be reached or refused access. Start the app; check AMS_API_TOKEN if API authentication is enabled." });
+        }
+      }
+    }
+    if (!captureFound) checks.push({ name: "Working Memory", ok: true, detail: "Optional capture is not installed in the user or current project settings." });
+    if (captureEnabled) this.ui.info('To check recall: in a NEW agent session in the same project, ask "Search long-term shared memory for a fact I saved. Give the matching memory ID. Do not answer from recent chat alone." This doctor check does not create a test memory.');
+
     return {
       changed: false,
       checks,
@@ -773,10 +894,11 @@ export class Installer {
       || options.mcpPort !== null && options.mcpPort !== undefined
       || options.namespace
       || options.projectDir
-      || options.scope,
+      || options.scope
+      || options.workingMemory,
     );
     if (!hasSavedInstall || hasInstallSettings) {
-      const installed = await this.install(options, "install");
+      const installed = await this.install({ ...options, workingMemory: false }, "install");
       if (installed.cancelled || installed.dryRun) {
         return installed;
       }
@@ -787,6 +909,7 @@ export class Installer {
     if (options.dryRun) {
       return { changed: false, dryRun: true, ok: true, plan };
     }
+    const workingMemory = options.workingMemory ? await this.configureWorkingMemory(options) : null;
     await this.buildLocalImage(context);
     await this.startLocalRedis(context);
     await this.migrateLocalMemories(context);
@@ -799,6 +922,7 @@ export class Installer {
       localImage: context.image,
       ok: true,
       status: "Docker source install complete",
+      workingMemory,
     };
   }
 
@@ -1032,6 +1156,7 @@ export class Installer {
   }
 
   async buildLocalImage(context) {
+    await this.syncWorkingMemoryUserId();
     this.ui.info(`Building ${context.image} from the current V0 source.`);
     await this.runChecked(
       "docker",
@@ -1114,6 +1239,8 @@ export class Installer {
   async uninstall() {
     const { manifest, paths, state } = await this.requireInstall();
     const warnings = [];
+    const workingMemory = await this.configureWorkingMemory({}, true);
+    if (workingMemory.cancelled) return workingMemory;
     for (const [agent, owned] of Object.entries(state.agents ?? {})) {
       const clientOptions = {
         name: manifest.mcpName,

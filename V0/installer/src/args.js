@@ -23,6 +23,14 @@ const VALUE_FLAGS = new Map([
   ["--namespace", "namespace"],
   ["--api-port", "apiPort"],
   ["--mcp-port", "mcpPort"],
+  ["--promotion", "promotion"],
+  ["--project-id", "projectId"],
+  ["--file", "file"],
+  ["--format", "format"],
+  ["--source-id", "sourceId"],
+  ["--source-project", "sourceProject"],
+  ["--source-revision", "sourceRevision"],
+  ["--select", "select"],
 ]);
 
 export function parseArgs(argv) {
@@ -30,20 +38,21 @@ export function parseArgs(argv) {
   let command = "install";
   let dockerTarget = null;
 
-  if (args[0] === "rules") {
-    args.shift();
+  if (["rules", "working-memory", "memories"].includes(args[0])) {
+    const group = args.shift();
+    const actions = group === "memories" ? ["export", "import"] : ["install", "uninstall", "update"];
     if (["--help", "-h"].includes(args[0])) {
-      command = "rules-install";
+      command = `${group}-${actions[0]}`;
     } else {
       const action = args.shift();
-      if (!action || !["install", "uninstall", "update"].includes(action)) {
+      if (!action || !actions.includes(action)) {
         throw new InstallerError(
           "E_BAD_COMMAND",
-          `Unknown rules command: ${action ?? "missing"}`,
-          "Use rules install, rules update, or rules uninstall.",
+          `Unknown ${group} command: ${action ?? "missing"}`,
+          `Use ${actions.map((item) => `${group} ${item}`).join(", ")}.`,
         );
       }
-      command = `rules-${action}`;
+      command = `${group}-${action}`;
     }
   } else if (args[0] && !args[0].startsWith("-")) {
     command = args.shift();
@@ -80,17 +89,27 @@ export function parseArgs(argv) {
   const options = {
     agents: null,
     agentsSpecified: false,
+    apply: false,
     apiPort: null,
     dryRun: false,
     dockerTarget,
     follow: false,
     force: false,
+    file: null,
+    format: null,
+    sourceId: null,
+    sourceProject: null,
+    sourceRevision: null,
+    select: null,
     help: false,
     json: false,
     mcpPort: null,
     namespace: null,
     nonInteractive: false,
     projectDir: null,
+    projectId: null,
+    promotion: null,
+    workingMemory: false,
     scope: null,
     version: false,
     yes: false,
@@ -113,6 +132,12 @@ export function parseArgs(argv) {
     }
 
     switch (flag) {
+      case "--apply":
+        options.apply = true;
+        break;
+      case "--working-memory":
+        options.workingMemory = true;
+        break;
       case "--dry-run":
         options.dryRun = true;
         break;
@@ -156,6 +181,42 @@ export function parseArgs(argv) {
     ? null
     : parsePort(options.mcpPort, "--mcp-port");
   options.agents = parseAgents(options.agents);
+  if (command.startsWith("memories-")) {
+    if (!options.help && !options.version && (!options.projectId?.trim() || !options.file?.trim())) {
+      throw new InstallerError("E_BAD_OPTION", "Memory export/import needs --project-id and --file.");
+    }
+    if (options.agentsSpecified || options.scope || options.projectDir || options.namespace || options.mcpPort || options.follow || options.workingMemory || options.promotion || options.force) {
+      throw new InstallerError("E_BAD_OPTION", "Use only memory file, source, selection, API port, preview, and confirmation options for memory export/import.");
+    }
+    if (options.apply && (command !== "memories-import" || options.dryRun)) {
+      throw new InstallerError("E_BAD_OPTION", "--apply is only for memories import and cannot be combined with --dry-run.");
+    }
+    const sourceOptions = options.sourceId || options.sourceProject || options.sourceRevision || options.select;
+    if (options.format && !["snapshot", "markdown", "claude-mem"].includes(options.format)) throw new InstallerError("E_BAD_OPTION", "--format must be snapshot, markdown, or claude-mem.");
+    if ((options.format || sourceOptions) && command !== "memories-import") throw new InstallerError("E_BAD_OPTION", "Source review options are only for memories import.");
+    const reviewed = ["markdown", "claude-mem"].includes(options.format);
+    if (sourceOptions && !reviewed) throw new InstallerError("E_BAD_OPTION", "Source selection needs --format markdown or claude-mem.");
+    if (reviewed && !options.help && !options.version) {
+      if (!options.sourceId) throw new InstallerError("E_BAD_OPTION", "File review needs a stable --source-id label.");
+      if (options.format === "claude-mem" && !options.sourceProject) throw new InstallerError("E_BAD_OPTION", "Claude-Mem review needs its exact --source-project.");
+      if (options.format === "markdown" && options.sourceProject) throw new InstallerError("E_BAD_OPTION", "--source-project is only for Claude-Mem exports.");
+      if (options.apply && (!options.select || !options.sourceRevision)) throw new InstallerError("E_BAD_OPTION", "Review first, then use --select and --source-revision with --apply.");
+    }
+  } else if (options.projectId || options.file || options.apply || options.format || options.sourceId || options.sourceProject || options.sourceRevision || options.select) {
+    throw new InstallerError("E_BAD_OPTION", "Memory file and source options are only for memories export/import.");
+  }
+  if (command.startsWith("working-memory-") && options.namespace) {
+    throw new InstallerError("E_BAD_OPTION", "Working Memory uses each Git repository's project ID; --namespace is not used.");
+  }
+  if (options.promotion && !["off", "review", "auto"].includes(options.promotion)) {
+    throw new InstallerError("E_BAD_OPTION", "--promotion must be off, review, or auto.");
+  }
+  if ((options.workingMemory || options.promotion) && !["install", "update", "docker:install", "working-memory-install", "working-memory-update"].includes(command)) {
+    throw new InstallerError("E_BAD_OPTION", "Working Memory options apply only to install or update.");
+  }
+  if (options.promotion && !options.workingMemory && !command.startsWith("working-memory-")) {
+    throw new InstallerError("E_BAD_OPTION", "Use --working-memory with --promotion.");
+  }
   validateDockerOptions(command, options);
   if (options.force && command !== "docker:reset") {
     throw new InstallerError(
@@ -252,6 +313,11 @@ Commands:
   rules install  Add safe shared-memory rules without changing the runtime
   rules update   Update only the installer-owned shared-memory rules
   rules uninstall Remove only installer-owned shared-memory rules
+  working-memory install  Add optional recent-chat capture hooks
+  working-memory update   Update only Working Memory hooks and settings
+  working-memory uninstall Remove capture hooks; keep stored data until expiry
+  memories export Export current shared project facts to a new JSON file
+  memories import Preview a snapshot or chosen source facts; --apply needs confirmation
   status       Show the saved install and container state without changing it
   doctor       Run deeper read-only checks
   update       Pull and apply the release bundled with this CLI
@@ -264,9 +330,19 @@ Options:
   --agents <auto|all|codex,claude>  Agents to configure
   --scope <user|project>            Install globally for this user or in one project
   --project-dir <path>              Project directory for project scope
+  --project-id <owner/repo>          Exact project for memories export/import
+  --file <path>                     New export file or one existing import source
+  --format <snapshot|markdown|claude-mem>  Import format (default: snapshot)
+  --source-id <label>               Stable source label for reviewed file imports
+  --source-project <name>           Exact project inside a Claude-Mem export
+  --select <1,3>                    Chosen fact numbers from the offline preview
+  --source-revision <sha256>        Exact file revision shown by that preview
+  --apply                           Save previewed facts (confirmation required)
   --namespace <name>                Fixed memory name for project scope
   --api-port <port>                 Local REST port (default: 8000)
   --mcp-port <port>                 Local MCP port (default: 9050)
+  --working-memory                  Also install optional recent-chat capture hooks
+  --promotion <off|review|auto>      Capture only, review facts, or auto-save facts (default: review)
   --dry-run                         Show the plan without changing anything
   --non-interactive                 Never prompt
   --yes, -y                         Accept the safe install plan

@@ -122,7 +122,50 @@ POST /v1/long-term-memory/
 
 # Search long-term memories
 POST /v1/long-term-memory/search
+
+# Read a full record, including its exact updated_at version
+GET /v1/long-term-memory/{id}
+
+# Edit; pass expected_version to reject stale edits with HTTP 409
+PATCH /v1/long-term-memory/{id}
+
+# View recent edits or restore a prior version
+GET /v1/long-term-memory/{id}/history
+POST /v1/long-term-memory/{id}/undo
+
+# Restore missing shared project facts without overwriting IDs
+POST /v1/long-term-memory/restore
 ```
+
+### Edit history and safe restore
+
+The graph's **History and undo** panel shows up to 20 prior edits, newest first.
+The history response contains `memory_id`, `current_version`, and `entries`.
+Each entry has `version`, `replaced_by`, `fields`, and `metadata`.
+Undo takes `version` and `expected_version`; use the exact `current_version`
+from history, not a rounded search timestamp. A successful undo creates a new
+version and rebuilds the embedding. A stale version returns HTTP 409.
+
+History covers text, topics, entities, memory type, event date, and pin state.
+Deleting a memory also deletes its history. This is edit recovery, not a recycle
+bin or a full audit log. History and version-checked writes require the Redis
+backend; unsupported custom backends return HTTP 501.
+
+The restore endpoint accepts `{ "project_id": "example/shop", "memories": [...] }`
+with up to 100 current shared semantic or episodic facts per request. It keeps
+IDs and timestamps, rebuilds embeddings, and rejects an occupied ID with HTTP
+409. It does not restore old edit history. The local installer validates a
+whole snapshot before sending batches and skips matching facts on a retry.
+See [export and restore project facts](../../INSTALL.md#export-and-restore-project-facts)
+for the simpler CLI workflow and its limits.
+
+The installer can also [preview selected Markdown or Claude-Mem facts](../../INSTALL.md#import-selected-notes-or-claude-mem-facts)
+offline. Saving uses the same create-only restore endpoint after explicit
+selection, source-revision verification and confirmation. Provenance includes
+`source`, `review: human-selected`, `source_identity`, `source_revision`, and
+`source_item`; Claude-Mem facts also retain source project/time. No raw chat or
+linked files are imported. Changed source text creates a new ID, not an update
+to an existing fact.
 
 ## Search Capabilities
 

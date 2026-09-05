@@ -20,12 +20,14 @@ from agent_memory_server.models import (
     CreateSummaryViewRequest,
     EditMemoryRecordRequest,
     GetSessionsQuery,
+    MemoryHistoryResponse,
     MemoryMessage,
     MemoryPromptRequest,
     MemoryPromptResponse,
     MemoryRecord,
     MemoryRecordResultsResponse,
     ModelNameLiteral,
+    RestoreMemoriesRequest,
     RunSummaryViewPartitionRequest,
     RunSummaryViewRequest,
     SearchModeEnum,
@@ -37,6 +39,7 @@ from agent_memory_server.models import (
     Task,
     TaskStatusEnum,
     TaskTypeEnum,
+    UndoMemoryRequest,
     UpdateWorkingMemory,
     WorkingMemory,
     WorkingMemoryResponse,
@@ -980,6 +983,26 @@ async def get_long_term_memory(
     return memory
 
 
+@router.post("/v1/long-term-memory/restore")
+async def restore_memories(
+    request: RestoreMemoriesRequest, current_user: UserInfo = Depends(get_current_user)
+):
+    """Restore shared project facts; existing IDs are never overwritten."""
+    if not settings.long_term_memory:
+        raise HTTPException(status_code=400, detail="Long-term memory is disabled")
+    try:
+        restored = await long_term_memory.restore_long_term_memories(
+            request.project_id, request.memories
+        )
+    except long_term_memory.MemoryVersionConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except NotImplementedError as e:
+        raise HTTPException(status_code=501, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"status": "ok", "restored": restored}
+
+
 @router.patch("/v1/long-term-memory/{memory_id}", response_model=MemoryRecord)
 async def update_long_term_memory(
     memory_id: str,
@@ -1003,14 +1026,23 @@ async def update_long_term_memory(
         raise HTTPException(status_code=400, detail="Long-term memory is disabled")
 
     # Convert request model to dictionary, excluding None values
-    update_dict = {k: v for k, v in updates.model_dump().items() if v is not None}
+    update_dict = {
+        k: v
+        for k, v in updates.model_dump(exclude={"expected_version"}).items()
+        if v is not None
+    }
 
     if not update_dict:
         raise HTTPException(status_code=400, detail="No fields provided for update")
 
     try:
+        kwargs = (
+            {"expected_version": updates.expected_version}
+            if updates.expected_version is not None
+            else {}
+        )
         updated_memory = await long_term_memory.update_long_term_memory(
-            memory_id, update_dict
+            memory_id, update_dict, **kwargs
         )
         if not updated_memory:
             raise HTTPException(
@@ -1018,8 +1050,54 @@ async def update_long_term_memory(
             )
 
         return updated_memory
+    except long_term_memory.MemoryVersionConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except NotImplementedError as e:
+        raise HTTPException(status_code=501, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get(
+    "/v1/long-term-memory/{memory_id}/history", response_model=MemoryHistoryResponse
+)
+async def get_memory_history(
+    memory_id: str, current_user: UserInfo = Depends(get_current_user)
+):
+    """Read up to 20 previous edits in this record's unchanged scope."""
+    if not settings.long_term_memory:
+        raise HTTPException(status_code=400, detail="Long-term memory is disabled")
+    try:
+        history = await long_term_memory.get_long_term_memory_history(memory_id)
+    except NotImplementedError as e:
+        raise HTTPException(status_code=501, detail=str(e)) from e
+    if history is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return history
+
+
+@router.post("/v1/long-term-memory/{memory_id}/undo", response_model=MemoryRecord)
+async def undo_memory(
+    memory_id: str,
+    request: UndoMemoryRequest,
+    current_user: UserInfo = Depends(get_current_user),
+):
+    """Restore previous editable fields as a new, re-embedded version."""
+    if not settings.long_term_memory:
+        raise HTTPException(status_code=400, detail="Long-term memory is disabled")
+    try:
+        memory = await long_term_memory.undo_long_term_memory(
+            memory_id, request.version, request.expected_version
+        )
+    except long_term_memory.MemoryVersionConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except NotImplementedError as e:
+        raise HTTPException(status_code=501, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if memory is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return memory
 
 
 @router.post(

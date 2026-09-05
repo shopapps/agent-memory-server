@@ -1,6 +1,6 @@
 # Recency Boost
 
-Recency boost is an intelligent memory ranking system that combines semantic similarity with time-based relevance to surface the most contextually appropriate memories. It ensures that recent and frequently accessed memories are weighted appropriately in search results while maintaining semantic accuracy.
+Recency boost combines how closely a memory matches your search with when it was created and last read. Often-read memories receive a small, capped boost. Pinned memories keep their full time-based score, even when they are old.
 
 ## Overview
 
@@ -9,7 +9,7 @@ Traditional semantic search relies solely on vector similarity, which may return
 **Key Benefits:**
 
 - **Time-aware search**: Recent memories are weighted higher in results
-- **Access pattern learning**: Frequently accessed memories get priority
+- **Recent access**: Recently read memories get priority, with a small boost for repeated reads
 - **Freshness boost**: Newly created memories are more likely to surface
 - **Balanced ranking**: Combines semantic similarity with temporal relevance
 - **Configurable weights**: Fine-tune the balance between similarity and recency
@@ -27,28 +27,52 @@ final_score = (
 )
 
 where:
-recency_score = (
+base_recency = clamp_0_to_1(
     freshness_weight * freshness_score +
     novelty_weight * novelty_score
 )
+frequency = log(1 + min(max(access_count, 0), 100)) / log(101)
+recency_score = base_recency + 0.15 * frequency * (1 - base_recency)
+# Pinned memories always use recency_score = 1.0.
 ```
+
+Pinning protects a memory from age-based ranking loss in both Python and Redis
+search. It does not force that memory to the top: a closer match can still rank
+higher. Turning off recency boost also turns off this time-based pin protection.
+This changes search order only; it does not edit or delete memories. Explicit
+confirmation history is planned, not yet included.
+
+### Read-count limits
+
+The read count already stored on each memory is used in both Python and Redis
+ranking. Missing or zero counts keep the previous score. The boost grows slowly
+and stops growing at 100 reads. It fills at most 15% of the unused recency score,
+so a freshly scored or pinned memory stays at 1.0. With the default 0.2 recency
+weight, this adds at most 0.03 to the final score. These are fixed limits in the
+current implementation, not new API settings.
+
+A read is not a vote that a fact is true. Automated lookups also count, so this
+small boost must not replace relevance or human review. It changes search order,
+not stored facts or cleanup choices, and adds no AI calls. Disable recency boost to disable the
+read-count boost too. This is a bounded first step toward the fuller ranking
+model in the architecture; importance, confirmation and feedback are separate work.
 
 ### Scoring Components
 
 1. **Semantic Similarity**: Vector cosine similarity between query and memory
-2. **Freshness Score**: Based on when the memory was created (exponential decay)
-3. **Novelty Score**: Based on when the memory was last accessed (exponential decay)
+2. **Freshness Score**: Based on when the memory was last accessed (exponential decay)
+3. **Novelty Score**: Based on when the memory was created (exponential decay)
 
 ### Decay Functions
 
 Both freshness and novelty use exponential decay with configurable half-lives:
 
 ```python
-# Freshness: How recently was this memory created?
-freshness_score = exp(-ln(2) * days_since_creation / freshness_half_life)
+# Freshness: How recently was this memory accessed?
+freshness_score = exp(-ln(2) * days_since_last_access / half_life_last_access_days)
 
-# Novelty: How recently was this memory accessed?
-novelty_score = exp(-ln(2) * days_since_last_access / novelty_half_life)
+# Novelty: How recently was this memory created?
+novelty_score = exp(-ln(2) * days_since_creation / half_life_created_days)
 ```
 
 ## Configuration
@@ -76,10 +100,10 @@ Recency boost is controlled by several parameters that can be configured per sea
 | `recency_boost` | Enable/disable recency boost | `true` | boolean |
 | `recency_semantic_weight` | Weight for semantic similarity | `0.8` | 0.0-1.0 |
 | `recency_recency_weight` | Weight for recency score | `0.2` | 0.0-1.0 |
-| `recency_freshness_weight` | Weight for creation time within recency | `0.6` | 0.0-1.0 |
-| `recency_novelty_weight` | Weight for access time within recency | `0.4` | 0.0-1.0 |
-| `recency_half_life_last_access_days` | Days for novelty score to halve | `7.0` | > 0.0 |
-| `recency_half_life_created_days` | Days for freshness score to halve | `30.0` | > 0.0 |
+| `recency_freshness_weight` | Weight for access time within recency | `0.6` | 0.0-1.0 |
+| `recency_novelty_weight` | Weight for creation time within recency | `0.4` | 0.0-1.0 |
+| `recency_half_life_last_access_days` | Days for freshness score to halve | `7.0` | > 0.0 |
+| `recency_half_life_created_days` | Days for novelty score to halve | `30.0` | > 0.0 |
 
 **Note**: `semantic_weight + recency_weight = 1.0` and `freshness_weight + novelty_weight = 1.0`
 
@@ -167,8 +191,8 @@ results = await client.search_long_term_memory(
     recency_boost=True,
     recency_semantic_weight=0.7,
     recency_recency_weight=0.3,
-    recency_half_life_last_access_days=3.0,  # Shorter novelty decay
-    recency_half_life_created_days=14.0      # Shorter freshness decay
+    recency_half_life_last_access_days=3.0,  # Shorter freshness decay
+    recency_half_life_created_days=14.0      # Shorter novelty decay
 )
 ```
 
@@ -232,9 +256,9 @@ Results:
 ### Freshness vs Novelty Balance
 
 **High freshness weight (0.8 freshness, 0.2 novelty):**
-- Prioritizes newly created memories
-- Good for: Applications with constant new information
-- Use case: News, social media, live events
+- Prioritizes recently accessed memories
+- Good for: Reference systems, FAQs
+- Use case: Documentation, support systems
 
 **Balanced (0.6 freshness, 0.4 novelty):**
 - Considers both creation and access patterns
@@ -242,9 +266,9 @@ Results:
 - Default configuration
 
 **High novelty weight (0.2 freshness, 0.8 novelty):**
-- Prioritizes frequently accessed memories
-- Good for: Reference systems, FAQs
-- Use case: Documentation, support systems
+- Prioritizes newly created memories
+- Good for: Applications with constant new information
+- Use case: News, social media, live events
 
 ### Half-Life Configuration
 
@@ -289,13 +313,10 @@ To prevent excessive database updates, access time updates are rate-limited:
 - Batch updates are processed in background
 - Failed updates don't affect search functionality
 
-### Access Frequency Effects
+### Recent Access Effects
 
-Memories that are accessed frequently will:
-- Maintain higher novelty scores longer
-- Appear higher in recency-boosted searches
-- Build "momentum" through repeated access
-- Reflect actual usage patterns in rankings
+Reading a memory can refresh its `last_accessed` time and freshness score.
+The number of reads does not add a separate score or build up momentum.
 
 ## Real-World Tuning Examples
 
@@ -314,7 +335,7 @@ Memories that are accessed frequently will:
 }
 ```
 
-**Rationale**: Higher recency weight to surface current issues, freshness-focused to catch new problems.
+**Rationale**: Higher recency weight to surface current issues, freshness-focused to favor recently accessed problems.
 
 ### Personal Knowledge Assistant
 
@@ -348,7 +369,7 @@ Memories that are accessed frequently will:
 }
 ```
 
-**Rationale**: Heavy recency bias with short half-lives, freshness over novelty for breaking news.
+**Rationale**: Heavy recency bias with short half-lives, favoring recently accessed news. Increase novelty weight instead to favor newly created news.
 
 ## Monitoring and Analytics
 
@@ -404,7 +425,7 @@ test_config = {
 
 1. **Regular updates**: Keep important memories current through editing
 2. **Archive old content**: Remove or update outdated information
-3. **Strategic access**: Access important memories to boost their novelty scores
+3. **Pinned facts**: Pin important memories to protect them from age-based ranking loss
 4. **Content freshness**: Regularly add new relevant memories
 
 ### Performance Optimization

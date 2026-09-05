@@ -1,8 +1,15 @@
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
+from redisvl.index import AsyncSearchIndex
 
+from agent_memory_server.filters import ProjectId, UserId
 from agent_memory_server.memory_vector_db import RedisVLMemoryVectorDatabase
+from agent_memory_server.memory_vector_db_factory import _build_redis_schema
+from agent_memory_server.models import MemoryRecordResult
+from agent_memory_server.utils.recency import score_recency
 from agent_memory_server.utils.redis_query import RecencyAggregationQuery
 
 
@@ -80,7 +87,7 @@ async def test_redis_adapter_uses_aggregation_when_server_side_recency():
                     "extracted_from": "",
                     "event_date": None,
                     "text": "hello",
-                    "__vector_score": 0.9,
+                    "vector_distance": 0.9,
                 }
             ]
         )
@@ -105,3 +112,111 @@ async def test_redis_adapter_uses_aggregation_when_server_side_recency():
     assert len(results.memories) == 1
     assert results.memories[0].id == "m1"
     assert results.memories[0].text == "hello"
+
+
+@pytest.mark.asyncio
+async def test_redis_pinned_and_read_count_recency_match_python(requires_redis):
+    schema = _build_redis_schema()
+    identity = "pinned-recency-" + uuid4().hex
+    schema["index"].update(name=identity, prefix=identity)
+    index = AsyncSearchIndex.from_dict(schema, redis_client=requires_redis)
+    await index.create()
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    old = now - timedelta(days=365)
+    records = [
+        MemoryRecordResult(
+            id=identifier,
+            text="Example fact",
+            dist=0.2,
+            created_at=created,
+            last_accessed=created,
+            pinned=pinned,
+            project_id="project-example",
+            agent_id="agent-example",
+            metadata={"source": "test"},
+        )
+        for identifier, created, pinned in [
+            ("old-pinned", old, True),
+            ("new-pinned", now, True),
+            ("old-unpinned", old, False),
+            ("new-unpinned", now, False),
+        ]
+    ]
+    records += [
+        records[2].model_copy(update={"id": f"reads-{count}", "access_count": count})
+        for count in [-1, 0, 1, 10, 100, 1000000]
+    ]
+    await index.load(
+        [
+            {
+                "id_": record.id,
+                "pinned": int(record.pinned),
+                "created_at": record.created_at.timestamp(),
+                "last_accessed": record.last_accessed.timestamp(),
+                # Leave counts absent on original records to cover old hashes.
+                **(
+                    {"access_count": record.access_count}
+                    if record.id.startswith("reads-")
+                    else {}
+                ),
+            }
+            for record in records
+        ]
+    )
+    query = RecencyAggregationQuery("*")
+    query.load("id_", "pinned", "created_at", "last_accessed", "access_count")
+    query.apply(vector_distance="0.2")
+    query.apply_recency(now_ts=int(now.timestamp()))
+    result = await index.aggregate(query)
+    embeddings = MagicMock()
+    db = RedisVLMemoryVectorDatabase(index, embeddings)
+    scores = {
+        fields["id_"]: float(fields["recency"])
+        for fields in map(db._coerce_aggregate_row, result.rows)
+    }
+    for record in records:
+        assert scores[record.id] == pytest.approx(
+            score_recency(record, now=now, params={})
+        )
+    assert scores["old-pinned"] == scores["new-pinned"] == 1.0
+    assert scores["old-unpinned"] < scores["new-unpinned"]
+    assert scores["old-unpinned"] == scores["reads--1"] == scores["reads-0"]
+    assert (
+        scores["reads-0"] < scores["reads-1"] < scores["reads-10"] < scores["reads-100"]
+    )
+    assert scores["reads-100"] == scores["reads-1000000"]
+
+    # Invalid legacy counts are tested above, not written as valid memory models.
+    records = [record for record in records if record.access_count >= 0]
+    persisted_records = records + [
+        records[0].model_copy(update={"id": "other-project", "project_id": "other"}),
+        records[0].model_copy(update={"id": "other-user", "user_id": "private"}),
+    ]
+    embeddings.aembed_documents = AsyncMock(
+        return_value=[[1.0] + [0.0] * 1535 for _ in persisted_records]
+    )
+    embeddings.aembed_query = AsyncMock(return_value=[1.0] + [0.0] * 1535)
+    await db.add_memories(persisted_records)
+    # Call the production aggregation path directly: fallback must not mask errors.
+    result = await db._search_with_recency_aggregation(
+        query="Example fact",
+        redis_filter=db._build_filter_expression(
+            project_id=ProjectId(eq="project-example"),
+            user_id=UserId(eq="__shared__"),
+        ),
+        limit=len(records),
+        offset=0,
+        distance_threshold=None,
+        recency_params={},
+    )
+    identifiers = [memory.id for memory in result.memories]
+    assert len(identifiers) == len(records)
+    assert set(identifiers) == {memory.id for memory in records}
+    assert identifiers.index("old-pinned") < identifiers.index("old-unpinned")
+    assert identifiers.index("reads-100") < identifiers.index("reads-0")
+    assert all(memory.project_id == "project-example" for memory in result.memories)
+    assert all(memory.agent_id == "agent-example" for memory in result.memories)
+    assert all(memory.metadata == {"source": "test"} for memory in result.memories)
+    assert all(
+        memory.dist == pytest.approx(0, abs=0.000001) for memory in result.memories
+    )

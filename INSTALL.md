@@ -2,8 +2,9 @@
 
 This guide runs the open-source `V0/` server on macOS.
 
-This is the research version of Redis Agent Memory. For the supported managed
-service, see [Redis Agent Memory in Redis Iris](https://redis.io/agent-memory/).
+This Shopapps fork adds a local developer workflow to the Redis research
+foundation. Redis's separate supported product is
+[Redis Agent Memory in Redis Iris](https://redis.io/agent-memory/).
 
 ## Quickstart for a Mac
 
@@ -59,8 +60,9 @@ Rerunning `install` or `update` replaces only that marked block. Text outside
 the block is left as it was. Broken or repeated markers stop the install before
 Docker is changed.
 
-No hooks are added. A hook is a script that runs when an agent event happens.
-The normal instruction file, Skill folder, and MCP setting are enough.
+By default, no hooks are added. A hook is a script that runs when an agent
+event happens. Rules and MCP support agent-chosen reads and writes.
+For automatic recent-chat capture, opt into [Working Memory](#working-memory).
 
 The selected scope decides which instruction file is used:
 
@@ -80,13 +82,300 @@ rules use the project folder name by default. Set an exact name with
 `--namespace shopapps/acr`. A namespace is simply the memory folder name shared
 by Codex and Claude.
 
+### Working Memory
+
+Working Memory is an optional short-term stage before the long-term graph.
+It captures recent prompts and final replies, then suggests lasting project
+facts. Raw chat does not go into the graph.
+
+For an existing install, first rebuild the server from this checkout. This
+keeps the Redis memory database:
+
+```bash
+./ams docker:reset
+./ams working-memory install --agents all --scope user --yes
+```
+
+For a first install, include the feature in the same command:
+
+```bash
+./ams docker:install --working-memory --agents all --scope user --yes
+```
+
+Use `--agents codex` for Codex Desktop only, or `--agents claude` for Claude
+Code. **Codex Desktop does not need a separate Codex CLI install.** The installer
+recognizes `/Applications/Codex.app` and `~/Applications/Codex.app`, and writes
+its managed MCP settings directly when the CLI is absent. It respects
+`CODEX_HOME` and keeps unrelated settings. Restart the app and trust the new
+MCP/hook setup when asked. Existing CLI installations keep their normal path.
+The clients share the same [official MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
+
+To enable capture in only one Git project:
+
+```bash
+./ams working-memory install --agents all --scope project \
+  --project-dir /path/to/project --yes
+```
+
+The command prints a review link with your local user ID, for example
+`http://127.0.0.1:8000/admin/working-memory?user_id=...`.
+Open that link to see recent exchanges and suggested facts. You can also use
+the **Working Memory** link in the graph, or open
+[Working Memory directly](http://127.0.0.1:8000/admin/working-memory).
+Keep using the same scope and agents for later updates.
+
+#### Local user ID and API token
+
+The **local user ID is needed**, even on your own Mac. It tells the server which
+recent chats to load. The installer creates it and reuses it for Codex and
+Claude. It is not a password, OpenAI account ID, or login ID. The long-term
+graph itself does not need it.
+
+For the default local setup, Working Memory fills in the saved ID automatically.
+An ID in the link takes priority. Both page links keep the selected ID when
+you switch between Working Memory and the graph.
+
+- **Docker:** the installer copies only the ID from `working-memory-user.json`
+  in its support folder into `runtime.env` as `WORKING_MEMORY_LOCAL_USER_ID`.
+  Your Mac's settings folders are not mounted into Docker. `docker:install`
+  and `docker:reset` pick up an existing saved ID when rebuilding.
+- **Running the server directly on your Mac:** the page reads `userId` from
+  `~/.codex/ams-working-memory.json` or `~/.claude/ams-working-memory.json`.
+  It also respects `CODEX_HOME` and `CLAUDE_CONFIG_DIR`. The saved API address
+  must match the local server's scheme and port. Conflicting IDs are not guessed.
+- **Remote servers or servers with login checks enabled:** auto-fill is off.
+  Capture IDs do not come from the login system, so a login ID is not used as
+  a replacement. Use the review link or enter the saved capture ID.
+
+After adding Working Memory to an existing Docker app, load the saved ID with:
+
+```bash
+./ams docker:restart app
+```
+
+If the running image predates this change, use `./ams docker:reset` instead.
+Both commands keep the memory database.
+
+If the field is still blank, open the settings file above and copy `userId`.
+For project-only installs, look in the project's `.codex` or `.claude` folder.
+To print the Codex user-level ID in Terminal:
+
+```bash
+node -p 'require((process.env.CODEX_HOME || process.env.HOME + "/.codex") + "/ams-working-memory.json").userId'
+```
+
+Paste that value into **Local user ID**, then click **Load sessions**. You can
+bookmark the installer's review link to keep the ID handy. Missing or unreadable
+settings leave the field blank; the app does not create a new ID or search
+other users' memories to guess one.
+
+The **API token can stay blank** for the default local setup. It is only needed
+when the memory server requires an access token. It is **not your OpenAI API
+key**. The page uses it to read and change memories, but does not save it for
+later visits or put it in links.
+
+#### Choose what reaches long-term memory
+
+| Mode | Behaviour | AI use |
+| --- | --- | --- |
+| `--promotion off` | Capture and recall only | No extra model call for capture or recall |
+| `--promotion review` (default) | AI suggests project facts; you choose **Save to long-term** or **Dismiss** | Model call after a new final reply; embeddings when saving |
+| `--promotion auto` | AI-selected project facts are saved without human review | Model calls and embeddings |
+
+Start with review mode. The filter looks for project decisions, design facts,
+stable rules, constraints and confirmed fixes. It is asked to ignore small
+talk, guesses, general coding knowledge and temporary task status. Each
+suggestion must include a quote found in the stored exchange. AI selection
+can still be wrong; a high model confidence score is not proof.
+Assistant-only claims stay in review, even in auto mode, unless a user message
+contains the same supporting quote.
+
+To change mode or refresh the hooks without restarting Docker or changing MCP,
+rules or existing memories (the saved local ID is also copied into `runtime.env`):
+
+```bash
+./ams working-memory update --agents all --scope user --promotion auto --yes
+```
+
+Auto mode shares selected facts with the whole project. Raw working chat
+stays under the local user ID. Saving the same fact for the same project
+uses a stable ID, so retries do not create another graph node. Different
+wording can still produce separate facts. Existing facts are not rewritten
+or removed by this filter.
+
+Processing works in small batches: one exchange is checked and up to three
+eligible facts are saved, then the remaining work is queued automatically.
+The standard Docket worker retries failed processing up to three attempts,
+30 seconds apart. In-process development mode still offers **Filter now / retry**.
+The page distinguishes waiting work, checking, saving, review and failure,
+shows counts and last activity times, and refreshes every ten seconds while
+visible. A **Saved to long-term** link opens the matching graph node. A chat
+appearing in the left panel is not proof that it reached long-term memory.
+
+#### Automatic reading of saved facts
+
+New or updated hook installs enable `longTermRecall`. At session start, the
+agent receives recent chat and a small saved-fact briefing. Each public prompt
+also requests relevant saved project facts using local keyword search. These
+lookups make no generation or embedding calls. Existing manual MCP searches
+can still use meaning-based search.
+
+Saved context includes at most six whole facts within an 800-token budget,
+with their memory IDs. Lookups keep the exact project and the current user's
+private-or-shared user scope; agent-private and session-private records are
+excluded. All recalled text is labelled as data, not instructions. Startup
+briefings prefer pinned facts within a bounded recent candidate list, not
+every pinned record in a large database.
+
+To disable only automatic saved-fact recall, set `"longTermRecall": false` in
+the installed `ams-working-memory.json`. Updates preserve this choice. Older
+configs without that setting keep recent-chat-only recall until updated.
+Recall is optional and can be skipped if the hook's time budget is exhausted.
+
+#### Watch filtering usage
+
+The selected session shows today's reported filtering tokens for that local
+user and project, the model, and any calls whose usage is unknown. A token is
+a small piece of text the model reads or writes. This is not a currency bill;
+it excludes embeddings, summaries and the agent's own calls.
+
+To pause new filtering after a daily allowance, set
+`WORKING_MEMORY_DAILY_FILTER_TOKEN_LIMIT=20000` in the server environment
+(for the managed install, its protected `runtime.env`), then restart the app.
+`0` is the default and means no allowance. The day resets at midnight UTC.
+The last admitted call can go over the threshold, so this is **not a hard
+spending cap**. Provider-side billing limits remain separate.
+
+Unknown usage pauses new filtering when an allowance is set. Check the provider,
+wait for the next UTC day, or deliberately disable the allowance. Captured chat
+still follows its normal expiry and already-filtered facts can still be saved.
+Usage counters contain no chat and expire after eight days.
+
+#### Keep a small handoff from a longer chat
+
+Optional handoff excerpts help a later task catch up when old exchanges leave
+the 30-exchange window. They reuse existing filtered suggestions backed by an
+exact user quote. They are not a new AI summary, a task list, or saved long-term
+facts, and they do not cause another AI request.
+
+Set `WORKING_MEMORY_HANDOFF_ENABLED=true` in the server's environment (the
+managed install's protected `runtime.env`), then run `./ams docker:restart app`.
+The default is `false`. The Working Memory page shows **Earlier handoff excerpts**
+with the source quote and expiry. **Forget excerpt** removes a note without
+changing any long-term memory.
+
+Each session keeps at most six excerpts within a 4,000-character JSON budget.
+Each expires seven days from its source message, even if the session stays
+active. Private or changed source events retract their earlier excerpts.
+Handoffs cannot be promoted directly; saving a lasting fact remains a separate
+step. They do not recover chat already dropped before the option was enabled.
+They are returned as labelled, untrusted context alongside recent chat, inside
+the existing recall size limit. Disabling the option stops returning them.
+
+#### Limits, hooks and privacy
+
+- Up to **30 exchanges per session**: one prompt plus one final reply.
+  A session also has a 120,000-character total limit; each message is limited
+  to 8,000 characters. Large sessions may keep fewer than 30 exchanges.
+- Messages and pending suggestions expire **seven days after the last new
+  captured event**. Reading or filtering does not extend that time. This
+  feature drops old exchanges; it does not make a permanent chat archive.
+- Hooks run at `UserPromptSubmit`, `Stop` and `SessionStart`. A new/resumed
+  session gets a bounded slice of recent history from the same user and Git
+  project. Old messages are marked as untrusted history, not new instructions.
+  Saved-fact recall is separate, bounded keyword search—not a guarantee that
+  the agent will use every returned fact.
+- Project IDs use the Git remote `owner/name`, falling back to the Git folder
+  name. Projectless chats are skipped. The local user ID is shared by the
+  installed Codex and Claude hooks. Do not install both user and project hooks
+  for the same client unless you intend both to run.
+- Codex uses `~/.codex/hooks.json`; Claude uses `~/.claude/settings.json`.
+  User-scope installs respect `CODEX_HOME` and `CLAUDE_CONFIG_DIR`. Project
+  installs use the project's `.codex/` or `.claude/` folder. Unrelated hook
+  entries are kept. Previous config files are backed up in the install folder.
+- **Review and trust new or changed hooks in your agent, then start a new
+  task.** Codex may skip untrusted hooks. Your client must provide the documented
+  `turn_id` (Codex) or `prompt_id` (Claude Code 2.1.196+) and
+  `last_assistant_message`. Older clients missing these fields are skipped;
+  we do not scrape transcript files as a fallback.
+- Hooks send only prompt/final-reply fields to the loopback API. They do not
+  read files, transcripts or tool output. Errors and timeouts do not block
+  the agent. A private local queue beside the installed hook keeps up to 60
+  events, 512 KiB, for up to 24 hours. A later enabled hook for the same
+  API/user/project/client retries up to three events. No later hook means no
+  replay; expired/overflow entries are dropped on the next queue update.
+  This is bounded recovery, not a full chat backup. Replies without a known
+  prompt privacy state are omitted.
+- A `<private>...</private>` marker or a common secret pattern causes the
+  whole exchange to be omitted. These checks are best-effort, **not a complete
+  secret detector**. Do not paste secrets expecting every format to be caught.
+- In review/auto modes, the filtered chat is sent to the server's configured
+  AI provider. API charges may apply. ChatGPT Pro does not pay for those server
+  calls. No provider key is needed for capture-only mode; recalled text still
+  takes space in the agent's own context.
+- Use `AMS_WORKING_MEMORY_DISABLED=1` in an agent's environment to skip its
+  hooks. For an authenticated local API, provide `AMS_API_TOKEN` to the agent
+  environment. Do not put tokens in project files. The hook accepts loopback
+  HTTP URLs only and refuses redirects.
+- User/project IDs keep retrieval scopes separate; they are **not access
+  controls**. This follows the existing API authentication model. Anyone with
+  access to an unauthenticated local server can inspect its data. Do not expose
+  the development server to a network.
+- Project hook/config files contain a machine path and local user ID. Keep
+  them local rather than checking them into a team's repository. No chat is
+  written to these config files or Git. The separate local retry queue does
+  contain permitted chat, with owner-only file permissions; it contains no
+  API token. Old config backups contain settings, not chat.
+
+Hook contracts: [Codex hooks](https://developers.openai.com/codex/hooks) and
+[Claude Code hooks](https://code.claude.com/docs/en/hooks). Check actual capture
+in your installed Desktop/client version using the tests below.
+
+#### Check that it works
+
+1. In a new agent task inside a Git project, say:
+   **“For this project, our agreed rule is to run tests before merging code.”**
+   Wait for the reply. Open the review link and choose **Load sessions**.
+   The new session should show your prompt and the final reply.
+2. In review mode, select the session after filtering finishes. Check any
+   suggested fact against its source quote, then choose **Save to long-term**.
+   Open the graph and search for the fact. The graph refreshes every 10 seconds.
+3. Start a fresh task in the same project and ask:
+   **“Search long-term shared memory for our agreed project rule. Give me the
+   rule and its memory ID. Do not answer from recent chat alone.”**
+   Match the returned ID to the saved fact below. A correct-sounding answer is
+   not enough. A task in a different project must not receive that recent chat.
+4. Try **“Hello, how are you?”**. This should be captured but should not produce
+   a lasting project fact. AI filtering is a judgment, so review the outcome.
+
+If messages appear but suggestions do not, use **Filter now / retry** and check
+the displayed filter status. Empty suggestions can be correct. A failed status
+can mean a missing provider key or worker problem. If no messages appear,
+check hook trust, supported client fields, the server port and the chosen
+user/project scope. `./ams doctor` checks the runtime/MCP setup, owned capture
+hooks, received events, review/waiting work, saved counts and safe errors. It
+does not write a paid test fact or prove the agent used a returned fact; the
+fresh-session memory-ID check does that.
+
+To stop capture without changing saved memories:
+
+```bash
+./ams working-memory uninstall --agents all --scope user --yes
+```
+
+This removes only owned hook entries, leaves a disabled local config, and lets
+existing working data expire. Full `uninstall` also removes Working Memory
+hooks in the runtime install's scope; separately installed scopes must be
+removed with the command above and the matching scope flags.
+
 ### Quickstart needs and assumptions
 
 - A Mac supported by the current Docker Desktop release. Apple Silicon and
   Intel Docker images are included.
 - Node.js 20 or newer, with `npm` and `npx`.
 - Docker Desktop with Docker Compose, installed, open, and ready.
-- One supported command-line agent: Codex, Claude Code, or both.
+- Codex Desktop, the Codex CLI, Claude Code, or both clients. Codex Desktop
+  does not need a separate Codex CLI install.
 - Git and access to GitHub for the first clone.
 - Internet access to Docker Hub for the fixed container images.
 - Local ports `8000` and `9050` free. Other ports can be chosen with flags.
@@ -215,6 +504,12 @@ only that memory. Deletion is permanent. A pinned memory can still be deleted
 by hand, and deleting does not use OpenAI credits. Only give graph access to
 people you trust with the memory REST API.
 
+Use **History and undo** to view the last 20 edits and restore an older version.
+Undo creates a new version and rebuilds its search embedding, which may use
+provider credits. If someone else changed the fact meanwhile, reload and review
+it before trying again. History protects edits, not deletion: deleting a memory
+also removes its history.
+
 New memories use their project ID for the project tabs. For older memories
 without one, the graph uses the leading `owner/project` part of the namespace,
 then shows any remaining path as namespace filters.
@@ -226,8 +521,98 @@ requires authentication and does not include its own sign-in screen. A shared
 deployment needs a trusted web proxy or another browser login layer that sends
 the supported bearer token.
 
+A login or token is not a per-project access rule. Separate team permissions
+are not part of this local setup yet; do not use project names as a security
+boundary or expose this install as a shared team service.
+
 If you chose different ports, use those port numbers instead. You can also run
 the local `status` or `doctor` commands below to check the install.
+
+### Export and restore project facts
+
+From the repository root:
+
+```bash
+./ams memories export --project-id example/shop --file facts.json
+./ams memories import --project-id example/shop --file facts.json
+./ams memories import --project-id example/shop --file facts.json --apply --yes
+```
+
+The first command saves the project's current shared facts to a new private
+file. It will not replace an existing file. The second command only previews
+the restore. The third restores missing facts, keeping their IDs. Matching
+facts are skipped; a conflicting ID stops the restore instead of overwriting
+data. Restore can use embedding credits. Use `AMS_API_TOKEN` when your server
+requires authentication; never put a token in the snapshot.
+
+This is a portable copy of current shared facts, not a full database backup.
+It excludes private chat, user-only facts, old edit history, and unknown extra
+metadata. Keep the file private and review it before sharing. Pause project
+writes while exporting for a consistent copy. Import requires the same project
+ID. Large restores run in batches; if interrupted, check the reported counts
+and rerun the same file safely. The limits are 10,000 facts and 50 MiB per file.
+
+### Import selected notes or Claude-Mem facts
+
+You do not need a running server to preview a source file. Start with a small
+Markdown file such as `facts.md`, containing one fact per top-level bullet:
+
+```markdown
+- Use Example Customer in sample customer records.
+- Run the project tests before sharing a change.
+```
+
+Preview its full facts without saving or calling a model:
+
+```bash
+./ams memories import --project-id example/shop --file facts.md \
+  --format markdown --source-id team-conventions
+```
+
+Read the numbered facts and copy the printed source revision. To save just
+fact 1, replace `PASTE_REVISION_HERE` below with that value:
+
+```bash
+./ams memories import --project-id example/shop --file facts.md \
+  --format markdown --source-id team-conventions \
+  --select 1 --source-revision PASTE_REVISION_HERE --apply
+```
+
+The command asks before saving. The server must be running for this step;
+embedding work can use provider credits. Use `--select 1,3` to choose several
+facts. `--yes` alone never saves: `--apply`, selection and revision are required.
+Changing the file after preview stops the import until you review it again.
+
+For an official Claude-Mem JSON export:
+
+```bash
+./ams memories import --project-id example/shop --file claude-export.json \
+  --format claude-mem --source-id old-project-notes --source-project shop
+```
+
+`--source-project` is the exact project name inside that export;
+`--project-id` is its destination in Agent Memory. Apply selected facts using
+the same selection/revision flags. Only the export's structured observation
+facts are supported, not prompts, sessions, summaries, narratives or tool
+output. See Claude-Mem's [export guide](https://docs.claude-mem.ai/usage/export-import).
+
+Limits and safeguards:
+
+- One regular file, at most 2 MiB, with at most 200 facts of 4,000 characters
+  each. Claude-Mem exports may contain at most 2,000 observations.
+- Markdown accepts single-line, top-level `-`, `*` or `+` bullets. Code fences,
+  comments and front matter are ignored. Links and named files are never read.
+- Text is treated as untrusted data, not instructions. Basic private/secret
+  screening runs before preview, but you must still review the file yourself.
+- Keep `--source-id` stable and generic. It is a saved source label, not a path.
+  Saved facts keep the source item and first accepted file revision.
+- Repeating unchanged facts from the same source skips matching IDs, even when
+  their positions move. Duplicate selected text is saved once. The first accepted
+  source citation is kept. Changed text creates a new ID; imports do not replace
+  old facts automatically. Use the graph's edit option for corrections.
+- Existing conflicting IDs stop the operation; they are never overwritten.
+  Keep your original Claude-Mem backup. This is selected-fact transfer, not a
+  full history migration or an uninstall step.
 
 ### Use shared memory in agent tasks
 

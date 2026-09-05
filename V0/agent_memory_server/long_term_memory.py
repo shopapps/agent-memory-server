@@ -36,9 +36,14 @@ from agent_memory_server.filters import (
     UserId,
 )
 from agent_memory_server.llm import LLMClient, optimize_query_for_vector_search
+from agent_memory_server.memory_vector_db import (
+    MemoryVersionConflictError,
+    RedisVLMemoryVectorDatabase,
+)
 from agent_memory_server.memory_vector_db_factory import get_memory_vector_db
 from agent_memory_server.models import (
     ExtractedMemoryRecord,
+    MemoryHistoryResponse,
     MemoryRecord,
     MemoryRecordResult,
     MemoryRecordResults,
@@ -2381,6 +2386,8 @@ async def get_long_term_memory_by_id(memory_id: str) -> MemoryRecord | None:
     db = await get_memory_vector_db()
 
     # Search for the memory by ID using filter-only query (no embedding required)
+    if isinstance(db, RedisVLMemoryVectorDatabase):
+        return await db.get_memory(memory_id)
     results = await db.list_memories(
         limit=1,
         id=Id(eq=memory_id),
@@ -2394,6 +2401,8 @@ async def get_long_term_memory_by_id(memory_id: str) -> MemoryRecord | None:
 async def update_long_term_memory(
     memory_id: str,
     updates: dict[str, Any],
+    *,
+    expected_version: datetime | None = None,
 ) -> MemoryRecord | None:
     """
     Update a long-term memory by ID.
@@ -2412,6 +2421,8 @@ async def update_long_term_memory(
     existing_memory = await get_long_term_memory_by_id(memory_id)
     if not existing_memory:
         return None
+    if expected_version is not None and expected_version != existing_memory.updated_at:
+        raise MemoryVersionConflictError("Memory changed; reload before editing")
 
     # Valid fields that can be updated
     updatable_fields = {
@@ -2446,9 +2457,79 @@ async def update_long_term_memory(
 
     # Update in the database
     db = await get_memory_vector_db()
-    await db.update_memories([updated_memory])
+    if expected_version is not None:
+        if not isinstance(db, RedisVLMemoryVectorDatabase):
+            raise NotImplementedError(
+                "Versioned edits require the Redis memory backend"
+            )
+        await db.update_memories(
+            [updated_memory], expected_versions={memory_id: expected_version}
+        )
+    else:
+        await db.update_memories([updated_memory])
 
     return updated_memory
+
+
+async def get_long_term_memory_history(memory_id: str) -> MemoryHistoryResponse | None:
+    memory = await get_long_term_memory_by_id(memory_id)
+    if memory is None:
+        return None
+    db = await get_memory_vector_db()
+    if not isinstance(db, RedisVLMemoryVectorDatabase):
+        raise NotImplementedError("Memory history requires the Redis memory backend")
+    return MemoryHistoryResponse(
+        memory_id=memory.id,
+        current_version=memory.updated_at,
+        entries=await db.get_memory_history(memory),
+    )
+
+
+async def restore_long_term_memories(
+    project_id: str, memories: list[MemoryRecord]
+) -> int:
+    """Restore shared project facts synchronously, without overwriting any ID."""
+    if not project_id.strip() or not memories or len(memories) > 100:
+        raise ValueError("Restore needs a project and between 1 and 100 memories")
+    if len({memory.id for memory in memories}) != len(memories):
+        raise ValueError("Restore contains repeated memory IDs")
+    for memory in memories:
+        if memory.project_id != project_id or any(
+            value is not None
+            for value in (memory.user_id, memory.agent_id, memory.session_id)
+        ):
+            raise ValueError(
+                "Restore accepts only shared facts in the selected project"
+            )
+        if not memory.id.strip() or not memory.text.strip():
+            raise ValueError("Restored memories need nonblank IDs and text")
+    db = await get_memory_vector_db()
+    if not isinstance(db, RedisVLMemoryVectorDatabase):
+        raise NotImplementedError(
+            "Create-only restore requires the Redis memory backend"
+        )
+    return len(await db.add_memories(memories, create_only=True))
+
+
+async def undo_long_term_memory(
+    memory_id: str,
+    version: datetime,
+    expected_version: datetime,
+) -> MemoryRecord | None:
+    history = await get_long_term_memory_history(memory_id)
+    if history is None:
+        return None
+    if history.current_version != expected_version:
+        raise MemoryVersionConflictError("Memory changed; reload before restoring")
+    entry = next((entry for entry in history.entries if entry.version == version), None)
+    if entry is None:
+        raise ValueError("History version is not available")
+    fields = dict(entry.fields)
+    if fields.get("event_date") is not None:
+        fields["event_date"] = parse_iso8601_datetime(fields["event_date"])
+    return await update_long_term_memory(
+        memory_id, fields, expected_version=expected_version
+    )
 
 
 def _is_numeric(value: Any) -> bool:
@@ -2535,6 +2616,7 @@ def select_ids_for_forgetting(
             "novelty_weight": 0.4,
             "half_life_last_access_days": 7.0,
             "half_life_created_days": 30.0,
+            "include_access_count": False,  # Search popularity must not change cleanup.
         }
         ranked = rerank_with_recency(eligible_for_budget, now=now, params=params)
         keep_ids = {mem.id for mem in ranked[:budget]}

@@ -5,6 +5,7 @@ import { detectAgents } from "./agents.js";
 import { helpText, parseArgs } from "./args.js";
 import { asInstallerError, InstallerError } from "./errors.js";
 import { Installer } from "./installer.js";
+import { transferMemories } from "./memories.js";
 import { createPrompter } from "./prompts.js";
 import { createSystem } from "./system.js";
 
@@ -31,6 +32,17 @@ export async function main(argv, dependencies = {}) {
     const prompter = dependencies.prompter ?? createPrompter(system.input, system.output);
     const ui = createUi(system, prompter, parsed.options);
     const installer = new Installer({ packageRoot, system, ui });
+    if (parsed.command.startsWith("memories-")) {
+      let state;
+      const offlineReview = ["markdown", "claude-mem"].includes(parsed.options.format) && !parsed.options.apply;
+      if (!offlineReview) {
+        await installer.prepareInstallRoot();
+        state = await installer.readState(installer.paths());
+      }
+      const result = await transferMemories({ command: parsed.command, options: parsed.options, system, ui, state });
+      printResult(system, parsed.command, parsed.options, result);
+      return exitCodeForResult(parsed.command, result);
+    }
     const hasSavedInstall = await installer.hasSavedInstall();
     const hasSavedRules = await installer.hasSavedRules();
     await resolveGuidedOptions(
@@ -149,7 +161,7 @@ function createUi(system, prompter, options) {
       if (options.nonInteractive || !system.input.isTTY || !system.output.isTTY) {
         throw new InstallerError(
           "E_CONFIRM_REQUIRED",
-          "The install plan needs confirmation.",
+          "This action needs confirmation.",
           "Run again with --yes, or use an interactive terminal.",
         );
       }
@@ -205,6 +217,10 @@ function printResult(system, command, options, result) {
     if (!result.providerConfigured) {
       system.output.write("Add OPENAI_API_KEY before using model-backed memory features.\n");
     }
+    if (result.workingMemory?.workingMemoryUrl) {
+      system.output.write(`Working Memory: ${result.workingMemory.workingMemoryUrl}\n`);
+      system.output.write("Review and trust new hooks in your agent, then start a new task.\n");
+    }
     return;
   }
   if (["rules-install", "rules-update"].includes(command)) {
@@ -231,6 +247,14 @@ function printResult(system, command, options, result) {
   }
   if (result.status) {
     system.output.write(`Agent Memory ${result.status}.\n`);
+  }
+  if (result.workingMemoryUrl) {
+    system.output.write(`Working Memory: ${result.workingMemoryUrl}\n`);
+    system.output.write("Review and trust new hooks in your agent, then start a new task.\n");
+  }
+  if (result.workingMemory?.workingMemoryUrl) {
+    system.output.write(`Working Memory: ${result.workingMemory.workingMemoryUrl}\n`);
+    system.output.write("Review and trust new hooks in your agent, then start a new task.\n");
   }
 }
 

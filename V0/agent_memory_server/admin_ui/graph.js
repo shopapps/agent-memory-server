@@ -19,6 +19,15 @@ const loadStatus = document.querySelector("#load-status");
 const pageNotice = document.querySelector("#page-notice");
 const kindToggles = [...document.querySelectorAll(".kind-toggle")];
 
+const initialParameters = new URLSearchParams(location.search);
+const workingMemoryUserId = initialParameters.get("user_id")?.trim();
+const initialMemoryId = initialParameters.get("memory_id");
+if (workingMemoryUserId) {
+  const url = new URL("/admin/working-memory", location.origin);
+  url.searchParams.set("user_id", workingMemoryUserId);
+  document.querySelector("#working-memory-link").href = url.href;
+}
+
 const NODE_COLORS = {
   memory: "#4d8fff",
   project: "#8b5cf6",
@@ -60,8 +69,8 @@ const state = {
   deletingNodeId: null,
   hoveredNodeId: null,
   visibleKinds: new Set(["memory", "project", "namespace", "topic", "entity"]),
-  projectField: "",
-  projectValue: "",
+  projectField: initialParameters.get("project_id") ? "project_id" : "",
+  projectValue: initialParameters.get("project_id") || "",
   projectSeparator: "/",
   camera: { x: 0, y: 0, scale: 1 },
   autoFit: true,
@@ -882,8 +891,18 @@ function renderInspectorDetails(node) {
       tagBlock("Topics", memory.topics, "topic"),
       tagBlock("Entities", memory.entities, "entity"),
       detailBlock("Memory ID", memory.id),
+      detailBlock("Source", memory.metadata?.source),
+      detailBlock("Review", memory.metadata?.review),
+      detailBlock("Source role", memory.metadata?.source_role),
+      detailBlock("Source date", formatDate(memory.metadata?.source_created_at)),
     ].filter(Boolean);
     inspectorBody.append(...blocks);
+    const history = document.createElement("button");
+    history.type = "button";
+    history.className = "form-button";
+    history.textContent = "History and undo";
+    history.addEventListener("click", () => showMemoryHistory(node));
+    inspectorBody.append(history);
   } else {
     const blocks = [
       detailBlock("Value", node.value),
@@ -925,6 +944,7 @@ async function saveMemoryEdit(node, form, status, saveButton, cancelButton) {
     showNotice("No changes to save.");
     return;
   }
+  payload.expected_version = memory.updated_at;
 
   saveButton.disabled = true;
   cancelButton.disabled = true;
@@ -969,12 +989,30 @@ async function saveMemoryEdit(node, form, status, saveButton, cancelButton) {
   }
 }
 
-function renderInspectorEditor(node) {
-  const memory = node.memory;
+async function renderInspectorEditor(node) {
+  let memory = node.memory;
   if (!memory) return;
 
   state.editingNodeId = node.id;
   state.deletingNodeId = null;
+  editMemoryButton.hidden = true;
+  deleteMemoryButton.hidden = true;
+  const loading = document.createElement("p");
+  loading.textContent = "Loading the current record…";
+  inspectorBody.replaceChildren(loading);
+  try {
+    // Search rounds dates. Only the full record supplies an exact edit version.
+    const response = await fetch(`/v1/long-term-memory/${encodeURIComponent(memory.id)}`, { cache: "no-store" });
+    if (!response.ok) throw new Error(`The current memory could not load (${response.status}).`);
+    memory = await response.json();
+    if (!loading.isConnected || state.editingNodeId !== node.id) return;
+    node.memory = memory;
+  } catch (error) {
+    if (!loading.isConnected || state.editingNodeId !== node.id) return;
+    renderInspectorDetails(node);
+    showNotice(error.message, true);
+    return;
+  }
   inspectorKind.textContent = "Editing";
   inspectorKind.style.color = NODE_COLORS.memory;
   inspectorTitle.textContent = node.label;
@@ -1054,6 +1092,69 @@ function renderInspectorEditor(node) {
     saveMemoryEdit(node, form, status, saveButton, cancelButton);
   });
   text.focus();
+}
+
+async function showMemoryHistory(node) {
+  if (!node.memory) return;
+  state.editingNodeId = node.id;
+  state.deletingNodeId = null;
+  editMemoryButton.hidden = true;
+  deleteMemoryButton.hidden = true;
+  inspectorKind.textContent = "History";
+  inspectorBody.replaceChildren();
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "form-button";
+  close.textContent = "Back to memory";
+  close.onclick = () => renderInspectorDetails(node);
+  const status = document.createElement("p");
+  status.className = "edit-status";
+  status.setAttribute("role", "status");
+  status.textContent = "Loading earlier versions…";
+  inspectorBody.append(close, status);
+  try {
+    const response = await fetch(`/v1/long-term-memory/${encodeURIComponent(node.memory.id)}/history`, { cache: "no-store" });
+    if (!response.ok) throw new Error(`History could not load (${response.status}).`);
+    const history = await response.json();
+    if (!status.isConnected || state.editingNodeId !== node.id) return;
+    status.textContent = history.entries.length
+      ? "Up to 20 earlier edits are kept. Restoring an edit makes a new version and may use embedding credits."
+      : "No earlier edits are available. History starts with edits made using this version of the app.";
+    for (const entry of history.entries) {
+      const block = detailBlock(`Before ${formatDate(entry.replaced_by)}`, entry.fields.text, "memory-copy");
+      if (!block) continue;
+      const restore = document.createElement("button");
+      restore.type = "button";
+      restore.className = "form-button";
+      restore.textContent = "Restore this version";
+      restore.onclick = async () => {
+        if (!confirm("Restore this earlier text, tags, type, event date and pinned setting? The current version will stay in history.")) return;
+        const buttons = [...inspectorBody.querySelectorAll("button")];
+        buttons.forEach((button) => button.disabled = true);
+        try {
+          const saved = await fetch(`/v1/long-term-memory/${encodeURIComponent(node.memory.id)}/undo`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ version: entry.version, expected_version: history.current_version }),
+          });
+          if (!saved.ok) throw new Error(saved.status === 409
+            ? "This fact changed. Go back and reopen history before restoring."
+            : `The version could not be restored (${saved.status}).`);
+          const current = await saved.json();
+          if (!status.isConnected) return;
+          await loadGraph(current.id);
+          showNotice("Earlier version restored. The replaced version remains in history.");
+        } catch (error) {
+          if (status.isConnected) { status.textContent = error.message; status.classList.add("error"); }
+        } finally {
+          buttons.forEach((button) => button.disabled = false);
+        }
+      };
+      block.append(restore);
+      inspectorBody.append(block);
+    }
+  } catch (error) {
+    if (status.isConnected) { status.textContent = error.message; status.classList.add("error"); }
+  }
 }
 
 async function deleteSelectedMemory(node, status, confirmButton, cancelButton) {
@@ -1328,6 +1429,10 @@ async function loadGraph(
     if (selectedMemoryId) {
       const selectedNode = state.nodeById.get(`memory:${selectedMemoryId}`);
       if (selectedNode) selectNode(selectedNode);
+      else {
+        pageNotice.hidden = false;
+        pageNotice.textContent = `Memory ${selectedMemoryId} is not in this view. It may have been removed or be outside the result limit. Narrow the filters to find it.`;
+      }
     }
     const suffix = data.truncated ? "+" : "";
     const facetNote = data.facets_truncated ? " · filter list capped" : "";
@@ -1421,7 +1526,7 @@ async function pollGraph() {
 }
 
 resizeCanvas();
-loadGraph().finally(() => {
+loadGraph(initialMemoryId).finally(() => {
   window.setTimeout(pollGraph, GRAPH_POLL_INTERVAL_MS);
 });
 state.animationFrame = requestAnimationFrame(drawGraph);

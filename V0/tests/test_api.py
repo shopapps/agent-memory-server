@@ -4,8 +4,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent_memory_server.config import Settings, settings
+from agent_memory_server.memory_vector_db import MemoryVersionConflictError
 from agent_memory_server.models import (
     MemoryMessage,
+    MemoryRecord,
     MemoryRecordResult,
     MemoryRecordResultsResponse,
     SessionListResponse,
@@ -1687,6 +1689,102 @@ async def test_patch_long_term_memory_rejects_blank_text(client):
     assert response.status_code == 422
     assert "Memory text cannot be empty" in response.text
     mock_update.assert_not_awaited()
+
+
+class TestMemoryHistory:
+    @pytest.mark.asyncio
+    async def test_restore_response_and_conflict(self, client):
+        payload = {
+            "project_id": "project-a",
+            "memories": [{"id": "fact", "text": "PHP 8.4", "project_id": "project-a"}],
+        }
+        restore = AsyncMock(return_value=1)
+        with patch(
+            "agent_memory_server.api.long_term_memory.restore_long_term_memories",
+            restore,
+        ):
+            response = await client.post("/v1/long-term-memory/restore", json=payload)
+            assert response.status_code == 200
+            assert response.json() == {"status": "ok", "restored": 1}
+            restore.side_effect = MemoryVersionConflictError("ID already exists")
+            response = await client.post("/v1/long-term-memory/restore", json=payload)
+            assert response.status_code == 409
+            payload["memories"] *= 101
+            assert (
+                await client.post("/v1/long-term-memory/restore", json=payload)
+            ).status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_patch_passes_expected_version_and_returns_conflict(self, client):
+        version = datetime.now(UTC)
+        update = AsyncMock(
+            side_effect=MemoryVersionConflictError(
+                "Memory changed; reload before editing"
+            )
+        )
+        with patch(
+            "agent_memory_server.api.long_term_memory.update_long_term_memory", update
+        ):
+            response = await client.patch(
+                "/v1/long-term-memory/fact",
+                json={
+                    "text": "PHP 8.4",
+                    "expected_version": version.isoformat(),
+                },
+            )
+        assert response.status_code == 409
+        update.assert_awaited_once_with(
+            "fact", {"text": "PHP 8.4"}, expected_version=version
+        )
+
+    @pytest.mark.asyncio
+    async def test_history_and_undo_contract(self, client):
+        version = datetime.now(UTC)
+        history = {"memory_id": "fact", "current_version": version, "entries": []}
+        with patch(
+            "agent_memory_server.api.long_term_memory.get_long_term_memory_history",
+            AsyncMock(return_value=history),
+        ):
+            response = await client.get("/v1/long-term-memory/fact/history")
+        assert response.status_code == 200
+        assert response.json()["memory_id"] == "fact"
+        undo = AsyncMock(return_value=MemoryRecord(id="fact", text="PHP 8.3"))
+        with patch(
+            "agent_memory_server.api.long_term_memory.undo_long_term_memory", undo
+        ):
+            response = await client.post(
+                "/v1/long-term-memory/fact/undo",
+                json={
+                    "version": version.isoformat(),
+                    "expected_version": version.isoformat(),
+                },
+            )
+        assert response.status_code == 200
+        assert response.json()["text"] == "PHP 8.3"
+        undo.assert_awaited_once_with("fact", version, version)
+        assert (
+            await client.post(
+                "/v1/long-term-memory/fact/undo", json={"version": version.isoformat()}
+            )
+        ).status_code == 422
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "result,status",
+        [(None, 404), (NotImplementedError("Unsupported backend"), 501)],
+    )
+    async def test_history_missing_or_unsupported(self, client, result, status):
+        read = (
+            AsyncMock(side_effect=result)
+            if isinstance(result, Exception)
+            else AsyncMock(return_value=result)
+        )
+        with patch(
+            "agent_memory_server.api.long_term_memory.get_long_term_memory_history",
+            read,
+        ):
+            response = await client.get("/v1/long-term-memory/fact/history")
+        assert response.status_code == status
 
 
 class TestDeprecationHeader:

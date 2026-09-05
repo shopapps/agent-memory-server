@@ -86,6 +86,69 @@ def test_rerank_with_recency_prefers_recent_when_similarity_close():
     assert ranked[1].id == "old"
 
 
+def test_pinned_recency_does_not_decay_or_change_stored_memory():
+    now = datetime.now(UTC)
+    old = make_result("pinned", "Keep this fact", 0.2, 365, 365)
+    old.pinned = True
+    original = old.model_dump()
+    assert score_recency(old, now=now, params=default_params()) == 1.0
+    assert (
+        score_recency(old, now=now + timedelta(days=365), params=default_params())
+        == 1.0
+    )
+    assert old.model_dump() == original
+    old.pinned = False
+    assert score_recency(old, now=now, params=default_params()) < 0.01
+
+
+def test_pinned_recency_preserves_semantic_relevance():
+    now = datetime.now(UTC)
+    pinned = make_result("pinned", "Weak match", 0.9, 365, 365)
+    pinned.pinned = True
+    relevant = make_result("relevant", "Strong match", 0.01, 365, 365)
+    ranked = rerank_with_recency([pinned, relevant], now=now, params=default_params())
+    assert [memory.id for memory in ranked] == ["relevant", "pinned"]
+
+
+def test_read_count_boost_is_bounded_and_does_not_edit_memory():
+    now = datetime.now(UTC)
+    memory = make_result("read", "Example fact", 0.2, 365, 365)
+    scores = []
+    for count in [-1, 0, 1, 10, 100, 1000000]:
+        memory.access_count = count
+        original = memory.model_dump()
+        scores.append(score_recency(memory, now=now, params=default_params()))
+        assert memory.model_dump() == original
+    assert scores[0] == scores[1]
+    assert scores[1] < scores[2] < scores[3] < scores[4]
+    assert scores[4] == scores[5]
+    assert scores[4] - scores[1] <= 0.15
+    memory.pinned = True
+    assert score_recency(memory, now=now, params=default_params()) == 1.0
+
+
+def test_read_count_breaks_close_matches_but_not_a_large_relevance_gap():
+    now = datetime.now(UTC)
+    unused = make_result("unused", "Example fact", 0.2, 30, 30)
+    used = unused.model_copy(update={"id": "used", "access_count": 100})
+    ranked = rerank_with_recency([unused, used], now=now, params=default_params())
+    assert [memory.id for memory in ranked] == ["used", "unused"]
+    used.dist = 0.9
+    ranked = rerank_with_recency([used, unused], now=now, params=default_params())
+    assert [memory.id for memory in ranked] == ["unused", "used"]
+
+
+def test_read_count_does_not_change_cleanup_selection():
+    now = datetime.now(UTC)
+    recent = make_result("recent", "Example fact", 0.2, 30, 30)
+    older = make_result("older", "Example fact", 0.2, 31, 31)
+    older.access_count = 100
+    policy = {"budget": 1}
+    assert select_ids_for_forgetting([recent, older], policy=policy, now=now) == [
+        "older"
+    ]
+
+
 def test_rerank_with_recency_respects_semantic_weight_when_gap_large():
     # If semantic similarity difference is large, it should dominate
     params = default_params()

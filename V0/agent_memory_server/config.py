@@ -421,6 +421,12 @@ class Settings(BaseSettings):
     # Authentication settings
     disable_auth: bool = True
     auth_mode: Literal["disabled", "token", "oauth2"] = "disabled"
+    # Installer identity for the single-user local Working Memory review page.
+    working_memory_local_user_id: str | None = None
+    # Reported filter tokens per UTC day, user and project. Zero leaves filtering unlimited.
+    working_memory_daily_filter_token_limit: int = Field(default=0, ge=0)
+    # Retain bounded user-evidenced excerpts when captured exchanges leave the window.
+    working_memory_handoff_enabled: bool = False
 
     # OAuth2/JWT Authentication settings
     oauth2_issuer_url: str | None = None

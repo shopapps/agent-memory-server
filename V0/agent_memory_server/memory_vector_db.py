@@ -8,7 +8,7 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from contextlib import AsyncExitStack
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import reduce
 from hashlib import sha256
 from typing import Any
@@ -43,6 +43,7 @@ from agent_memory_server.filters import (
     UserId,
 )
 from agent_memory_server.models import (
+    MemoryHistoryEntry,
     MemoryRecord,
     MemoryRecordResult,
     MemoryRecordResults,
@@ -60,6 +61,11 @@ logger = logging.getLogger(__name__)
 _REQUIRED_SCOPE_FIELDS = {"project_id", "agent_id"}
 _MEMORY_ID_LOCK_TIMEOUT_SECONDS = 300
 _MEMORY_ID_LOCK_BLOCKING_TIMEOUT_SECONDS = 30
+MEMORY_HISTORY_LIMIT = 20
+
+
+class MemoryVersionConflictError(ValueError):
+    """The fact changed after the caller read it."""
 
 
 class _PhraseAwareQueryMixin:
@@ -782,27 +788,21 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         # Aggregate with APPLY/SORTBY boosted score
         now_ts = int(datetime.now(UTC).timestamp())
         agg = (
-            RecencyAggregationQuery.from_vector_query(
-                knn, filter_expression=redis_filter
-            )
+            RecencyAggregationQuery.from_vector_query(knn)
             .load_default_fields()
             .apply_recency(now_ts=now_ts, params=recency_params or {})
             .sort_by_boosted_desc()
             .paginate(offset, limit)
         )
 
-        raw = await self._index.aggregate(agg)
+        raw = await self._index.aggregate(agg, knn.params)
 
         rows = getattr(raw, "rows", raw) or []
         memory_results: list[MemoryRecordResult] = []
         for row in rows:
-            fields = getattr(row, "__dict__", None) or row
-            if isinstance(fields, dict):
-                pass
-            else:
-                fields = dict(fields) if fields else {}
-
-            dist = float(fields.get("__vector_score", 1.0) or 1.0)
+            fields = self._coerce_aggregate_row(row)
+            raw_distance = fields.get(VectorQuery.DISTANCE_ID)
+            dist = float(raw_distance) if raw_distance is not None else 1.0
             memory_results.append(
                 self._data_to_memory_result(
                     fields,
@@ -819,8 +819,15 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             next_offset=next_offset,
         )
 
-    async def add_memories(self, memories: list[MemoryRecord]) -> list[str]:
-        """Add memories using RedisVL's index.load()."""
+    async def add_memories(
+        self,
+        memories: list[MemoryRecord],
+        *,
+        preserve_history: bool = False,
+        expected_versions: dict[str, datetime] | None = None,
+        create_only: bool = False,
+    ) -> list[str]:
+        """Add memories, optionally recording a versioned edit under the ID lock."""
         if not memories:
             return []
 
@@ -866,10 +873,32 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
                     )
                     await lock_stack.enter_async_context(lock)
 
+                previous_records = {}
                 for memory_id, scope in incoming_scopes.items():
                     existing = await self._index.fetch(memory_id)
+                    if existing and create_only:
+                        raise MemoryVersionConflictError(
+                            "A memory ID already exists; no records were restored"
+                        )
                     if not existing:
+                        if expected_versions and memory_id in expected_versions:
+                            raise MemoryVersionConflictError(
+                                "Memory no longer exists; reload before editing"
+                            )
                         continue
+                    if preserve_history:
+                        previous_records[memory_id] = self._data_to_memory_result(
+                            existing
+                        )
+                    if (
+                        expected_versions
+                        and memory_id in expected_versions
+                        and previous_records[memory_id].updated_at
+                        != expected_versions[memory_id]
+                    ):
+                        raise MemoryVersionConflictError(
+                            "Memory changed; reload before editing"
+                        )
                     existing_scope = (
                         existing.get("namespace") or None,
                         decode_scope(existing.get("project_id")),
@@ -893,6 +922,12 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
                         memory.last_accessed = now
                     if not memory.updated_at:
                         memory.updated_at = now
+                    if preserve_history and memory.id in previous_records:
+                        memory.updated_at = max(
+                            memory.updated_at,
+                            previous_records[memory.id].updated_at
+                            + timedelta(microseconds=1),
+                        )
 
                 # Build data dicts with embeddings
                 data_list = []
@@ -905,7 +940,39 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
 
                 # Keep the ID locks until RedisVL has completed the write.
                 # Use id_field so keys include the index prefix.
-                await self._index.load(data_list, id_field="id_")
+                if preserve_history and previous_records:
+                    # The old fields and fresh vector become visible together.
+                    async with redis_client.pipeline(transaction=True) as pipeline:
+                        for memory, data in zip(memories, data_list, strict=True):
+                            previous = previous_records.get(memory.id)
+                            if previous:
+                                entry = MemoryHistoryEntry(
+                                    version=previous.updated_at,
+                                    replaced_by=memory.updated_at,
+                                    fields=previous.model_dump(
+                                        mode="json",
+                                        include={
+                                            "text",
+                                            "topics",
+                                            "entities",
+                                            "memory_type",
+                                            "event_date",
+                                            "pinned",
+                                        },
+                                    ),
+                                    metadata=previous.metadata,
+                                )
+                                key = self._history_key(previous.id)
+                                row = entry.model_dump(mode="json")
+                                row["scope"] = self._history_scope(previous)
+                                pipeline.lpush(key, json.dumps(row))
+                                pipeline.ltrim(key, 0, MEMORY_HISTORY_LIMIT - 1)
+                            pipeline.hset(self._index.key(memory.id), mapping=data)
+                            if memory.event_date is None:
+                                pipeline.hdel(self._index.key(memory.id), "event_date")
+                        await pipeline.execute()
+                else:
+                    await self._index.load(data_list, id_field="id_")
                 return memory_ids
 
         except Exception as e:
@@ -1120,25 +1187,97 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         )
 
     async def delete_memories(self, memory_ids: list[str]) -> int:
-        """Delete memories by their IDs using RedisVL."""
+        """Permanently delete current facts and their edit history together."""
         if not memory_ids:
             return 0
 
         await self._ensure_index()
 
         try:
-            return await self._index.drop_documents(memory_ids)
+            redis_client = self._index.client
+            async with AsyncExitStack() as locks:
+                for memory_id in sorted(set(memory_ids)):
+                    digest = sha256(
+                        f"{self._index.prefix}\0{memory_id}".encode()
+                    ).hexdigest()
+                    await locks.enter_async_context(
+                        redis_client.lock(
+                            f"agent-memory-server:memory-id-lock:{digest}",
+                            timeout=_MEMORY_ID_LOCK_TIMEOUT_SECONDS,
+                            blocking_timeout=_MEMORY_ID_LOCK_BLOCKING_TIMEOUT_SECONDS,
+                        )
+                    )
+                async with redis_client.pipeline(transaction=True) as pipeline:
+                    for memory_id in sorted(set(memory_ids)):
+                        pipeline.delete(self._index.key(memory_id))
+                        pipeline.delete(self._history_key(memory_id))
+                    results = await pipeline.execute()
+                return sum(results[::2])
         except Exception as e:
             logger.error(f"Error deleting memories from Redis: {e}")
             raise
 
-    async def update_memories(self, memories: list[MemoryRecord]) -> int:
+    async def update_memories(
+        self,
+        memories: list[MemoryRecord],
+        *,
+        expected_versions: dict[str, datetime] | None = None,
+    ) -> int:
         """Update memory records by re-adding them (HSET overwrites in Redis)."""
         if not memories:
             return 0
 
-        added = await self.add_memories(memories)
+        added = await self.add_memories(
+            memories, preserve_history=True, expected_versions=expected_versions
+        )
         return len(added)
+
+    def _history_key(self, memory_id: str) -> str:
+        digest = sha256(f"{self._index.prefix}\0{memory_id}".encode()).hexdigest()
+        return f"agent-memory-server:memory-history:{digest}"
+
+    def _history_scope(self, memory: MemoryRecord) -> str:
+        identity = json.dumps(
+            [
+                self._index.prefix,
+                memory.id,
+                memory.namespace,
+                memory.project_id,
+                memory.user_id,
+                memory.agent_id,
+                memory.session_id,
+                memory.created_at.isoformat(),
+            ]
+        )
+        return sha256(identity.encode()).hexdigest()
+
+    async def get_memory(self, memory_id: str) -> MemoryRecord | None:
+        """Read exact stored timestamps; search numeric fields can lose precision."""
+        await self._ensure_index()
+        fields = await self._index.fetch(memory_id)
+        return self._data_to_memory_result(fields) if fields else None
+
+    async def get_memory_history(
+        self, memory: MemoryRecord
+    ) -> list[MemoryHistoryEntry]:
+        await self._ensure_index()
+        rows = await self._index.client.lrange(
+            self._history_key(memory.id), 0, MEMORY_HISTORY_LIMIT - 1
+        )
+        # A deleted/recreated ID or an unrelated overwrite must not inherit history.
+        current_version = memory.updated_at
+        history = []
+        for row in rows:
+            stored = json.loads(row)
+            entry = MemoryHistoryEntry.model_validate(stored)
+            if (
+                stored.get("scope") != self._history_scope(memory)
+                or entry.replaced_by != current_version
+            ):
+                break
+            history.append(entry)
+            current_version = entry.version
+        return history
 
     async def count_memories(
         self,
@@ -1210,11 +1349,11 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
                 discrete_memory_extracted=discrete_memory_extracted,
             )
 
-            # Create FilterQuery for non-vector search
+            # Read one extra row to distinguish a full page from the final page.
             filter_query = FilterQuery(
                 filter_expression=redis_filter,
                 return_fields=self.RETURN_FIELDS,
-                num_results=limit + offset,
+                num_results=limit + offset + 1,
             )
 
             # Execute query using index.query() which properly handles params

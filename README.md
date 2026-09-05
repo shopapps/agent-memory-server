@@ -1,75 +1,166 @@
-<div align=center>
+# Shopapps Agent Memory
 
-# Redis Agent Memory
+## Project memory for Codex and Claude
 
-A memory layer that gives agents intelligent short-term memory and persistent context across conversations.
+Stop explaining the same project rules in every new chat.
+
+Give your coding agents a shared notebook on your Mac. Keep useful decisions,
+find them in later sessions, and see what your agents remember in a live,
+clickable memory graph.
+
+**[Install](#install-on-a-mac)** · **[See the features](#what-you-get)** ·
+**[Full guide](./INSTALL.md)** · **[API and developer docs](./V0/docs/index.md)**
+
+## Install on a Mac
+
+You need **Node.js 20+**, **Git**, **Docker Desktop running**, and
+**Codex Desktop or Claude Code**. Codex CLI is not required for Desktop users.
+
+Run these two commands in Terminal:
+
+```bash
+git clone https://github.com/shopapps/agent-memory-server.git && cd agent-memory-server
+./ams docker:install --working-memory --promotion review
+```
+
+Already have this checkout? Run just the second command from its root.
+
+The guided installer builds and starts Redis, the memory server and its worker,
+then connects your chosen agents. It adds the memory Skill, tool connection and
+a small rules block without replacing your existing instructions. Choose user
+scope to cover all your Git projects, or project scope for one repository.
+
+This command also enables recent-chat capture. **Review mode lets you check
+suggested facts before they become long-term shared memories.** Agent-requested
+saves through memory tools are separate. Omit `--working-memory --promotion review`
+if you only want agent-chosen reads and writes.
+
+Accept the hook trust prompt in your agent when shown, then start a new task.
+See the [full setup guide](./INSTALL.md#working-memory) for client details.
+
+The default AI setup uses your OpenAI API key. You can skip it during install,
+but AI filtering and embedding-based memory work need a configured provider.
+The installer does not supply API credits; hosted AI use can incur provider charges.
+[Add a key later](./INSTALL.md#add-an-openai-key-after-install) or
+[configure another provider](./V0/docs/llm-providers.md).
+
+**No npm release is required:** the installer runs from this checkout.
+Do not use `npx @shopapps/agent-memory@latest`; that package is not published.
+
+[Manual install, prerequisites and troubleshooting →](./INSTALL.md)
+
+## See your memory
 
 ![An anonymised example of the memory graph](./V0/docs/images/memory-graph-example.png)
 
-_Example only: every label, memory and count in this image is made up._
+*Illustration with generic labels—not live project data.*
 
-</div>
+After install, open:
+
+- **[Memory graph](http://127.0.0.1:8000/admin/memories/graph)** — explore, search,
+  edit and organise saved facts.
+- **[Working Memory](http://127.0.0.1:8000/admin/working-memory)** — see recent
+  capture, review suggestions and check progress.
+- **[API docs](http://127.0.0.1:8000/docs)** — try the server's HTTP API.
+
+## What you get
+
+| What you want | What Agent Memory does |
+| --- | --- |
+| Stop repeating project context | Shares durable facts between Codex and Claude on the same Mac, with separate project scopes. |
+| Remember useful work automatically | Optional hooks capture recent prompts and final replies. Review suggestions yourself, or opt into automatic saving. |
+| Bring context into a new task | Returns a small set of saved project facts and clearly labelled recent chat. |
+| Keep a small handoff from a long chat | Optional, expiring excerpts retain earlier user-backed suggestions without another AI call. |
+| Find facts even when wording changes | Supports meaning-based, keyword and combined search, with bounded results. |
+| Understand what was saved | A live graph links projects, topics, entities and memories. Click to inspect, pan or zoom. |
+| Correct a wrong fact | Edit a memory, inspect up to 20 earlier edits, and undo. Stale edits are rejected instead of overwriting newer changes. |
+| Know whether capture is working | See received, checked, waiting, reviewed and saved counts. Follow a saved fact straight to its graph node. |
+| Recover from a local outage | A small private queue retries permitted capture on the next enabled hook run. |
+| Move current project facts | Export a project, preview a restore, and add missing facts without overwriting conflicting IDs. |
+| Bring useful notes with you | Preview Markdown or Claude-Mem facts offline, then choose exactly which ones to save. |
+| Watch filtering use | See reported AI tokens and set a daily pause threshold. It is not a hard spending cap. |
+| Build your own integration | Use the HTTP API, Python client or MCP—the tool connection coding agents use. |
+
+Working Memory keeps up to **30 exchanges for seven days**. Durable saved facts
+are separate from that short-term chat. The graph checks for changes every
+**10 seconds** without resetting your view.
+
+## Try it in two tasks
+
+In your project's first task:
+
+> Save this as a shared project convention: use “Example Customer” in sample
+> customer records. Tell me the saved memory ID.
+
+In a new task for the same project:
+
+> Search shared memory for our sample customer convention. Give me the saved
+> name and matching memory ID. Do not answer from this chat alone.
+
+The IDs should match. This tests an explicit save and later recall.
+[Try the separate automatic-capture test](./INSTALL.md#working-memory).
+
+## Stay in control
+
+- **Local storage, not necessarily local AI.** The chosen provider receives
+  text for filtering and embeddings. [Local model setup](./V0/docs/llm-providers.md#ollama-local-models)
+  is available if you want to configure it yourself.
+- **Capture is optional.** Private markers and common secret patterns are
+  omitted before capture, but no automatic filter catches every secret.
+  Keep credentials and sensitive customer data out of memory.
+- **One Mac is the current supported quickstart.** Separate Macs do not sync.
+  Project filters are not team access controls. Do not expose this local,
+  authentication-disabled setup to a network.
+- **Your existing files stay yours.** Rules updates replace only the marked
+  block. Uninstall keeps the memory database and secret file.
+- **Undo covers edits, not deletion.** Deleting a memory also deletes its edit
+  history. Project exports contain current shared facts, not a full database
+  backup.
+
+[Privacy, retention and costs](./INSTALL.md#working-memory) ·
+[Export and restore](./INSTALL.md#export-and-restore-project-facts)
+· [Import selected notes](./INSTALL.md#import-selected-notes-or-claude-mem-facts)
+
+## Everyday commands
+
+Run from the repository root:
+
+```bash
+./ams doctor                  # Check setup and capture activity
+./ams docker:up               # Start the installed stack
+./ams docker:reset            # Rebuild this checkout; keep the memory database
+```
+
+After updating capture code, refresh the installed hook files too:
+
+```bash
+./ams working-memory update --agents all --scope user --yes
+```
+
+Use `--agents codex` or `--agents claude` for just one client. For a project-only
+install, use the [matching project scope](./INSTALL.md#working-memory).
+Restarting the agent does not rebuild Docker or copy changed hook files.
+
+## Build on it
+
+Source, tests and build commands live in [V0/](./V0/).
+Read [V0/README.md](./V0/README.md) for the developer setup,
+[ARCHITECTURE.md](./ARCHITECTURE.md) for the design, and
+[INSTALL.md](./INSTALL.md) for the complete quickstart and manual steps.
+
+The Shopapps fork is under active development. The features above describe
+this checkout; unreleased changes are not included in upstream Docker images.
 
 ## Redis Agent Memory in Redis Iris
 
-[Redis Agent Memory in Redis Iris](https://redis.io/agent-memory/) is Redis’s official managed path for teams that want agent memory as a service, not another subsystem to build and operate themselves. [Redis Iris](https://redis.io/iris/) is the real-time context engine for agents, designed to deliver fresh, relevant context at runtime, and Redis Agent Memory is the part of Iris that makes context compound across turns, sessions, channels, and agents.
+This fork builds on the open-source
+[Redis Agent Memory Server](https://github.com/redis/agent-memory-server).
+Credit to Redis and the upstream contributors for the foundation.
 
-Redis Agent Memory in Iris gives you the Redis-managed experience: a persistent, structured memory layer for AI agents exposed through a REST API and client libraries, with dedicated endpoints, secure API key management, configurable memory schemas, and automatic TTL-based lifecycle management. The point is not just storage. It is to remove the custom memory infrastructure teams otherwise end up building around session handling, extraction, retrieval, and lifecycle management.
-
-Redis Agent Memory uses a two-tier model. Session memory keeps the active conversation state, session history, and session-specific metadata close at hand, with configurable TTL control for retention. Long-term memory stores extracted facts and learned patterns from past interactions as text plus vector embeddings for semantic retrieval. As new events are written to working memory, Redis Agent Memory automatically extracts important information and promotes it to long-term memory in the background, so memory accumulates without slowing down the live agent loop.
-
-That matters because Redis Iris is not just a memory feature in isolation. It is a broader context engine built to address the production problems agents actually hit: fragmented data, stale operational state, slow retrieval, and interactions that do not improve over time. Within that story, Redis Agent Memory is the compounding memory layer; [Redis Context Retriever](https://redis.io/context-retriever/) makes business data navigable; [Redis Data Integration](https://redis.io/data-integration/) keeps operational state fresh; and [Redis LangCache](https://redis.io/langcache/) helps repeated work stay inside the latency budget.
-
-If you are evaluating the supported Redis path, these are the best places to start:
-
-- Product overview: [Redis Iris](https://redis.io/iris/)
-- Agent Memory overview: [Redis Agent Memory docs](https://redis.io/docs/latest/develop/ai/context-engine/agent-memory/)
-- Redis Cloud service guide: [Redis Agent Memory on Redis Cloud](https://redis.io/docs/latest/operate/rc/context-engine/agent-memory/)
-
-A practical getting-started flow on Redis Cloud looks like this:
-
-- [Create a database](https://redis.io/docs/latest/operate/rc/databases/create-database/)
-- [Create an Agent Memory service](https://redis.io/docs/latest/operate/rc/context-engine/agent-memory/create-service/)
-- [Use the Agent Memory API](https://redis.io/docs/latest/operate/rc/context-engine/agent-memory/use-agent-memory/) from your application
-- [View and manage your service](https://redis.io/docs/latest/operate/rc/context-engine/agent-memory/view-service/)
-
-For implementation details and usage examples, see:
-
-- [API and SDK examples](https://redis.io/docs/latest/develop/ai/context-engine/agent-memory/api-examples/)
-- [API reference](https://redis.io/docs/latest/develop/ai/context-engine/agent-memory/api-reference/)
-
-
-## V0 — the open-source research foundation
-
-[**`V0/`**](./V0/) contains the original Redis Agent Memory Server: an open-source reference implementation for agent memory with REST and MCP interfaces, working and long-term memory, configurable extraction strategies, and Redis-backed semantic search.
-It serves as the research foundation and architectural starting point for Redis Agent Memory, but it is not the current supported production path.
-
-- **Start here:** [`V0/README.md`](./V0/README.md)
-- **Quickstart and manual installation:** [`INSTALL.md`](./INSTALL.md)
-- **Current local command:** from this repository root, run
-  `./ams docker:install`.
-  `npx --yes ./V0/installer docker:install` remains available as a fallback.
-  The installer is not published to npm.
-- **Run the current source in Docker:** use `./ams docker:install`. After code
-  changes, `./ams docker:reset` rebuilds the current source while keeping the
-  Redis memory database; see
-  [`INSTALL.md`](./INSTALL.md#run-the-current-source-in-docker).
-- **Automatic agent rules:** the quickstart safely adds an owned block to the
-  active Codex `AGENTS.md` and Claude `CLAUDE.md`. See the
-  [simple memory examples](./INSTALL.md#use-shared-memory-in-agent-tasks) and
-  [`rules` commands](./INSTALL.md#use-the-rules-only-commands).
-- **Documentation:** [`V0/docs/`](./V0/docs/index.md)
-- **Local API docs after install:**
-  [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-- **Local memory graph after install:**
-  [http://127.0.0.1:8000/admin/memories/graph](http://127.0.0.1:8000/admin/memories/graph)
-  The graph silently checks for new memories every 10 seconds and adds them
-  without resetting the current view.
-- Build, test, and run everything from inside `V0/` (e.g. `cd V0 && make test`).
-
-
+Redis's separate supported product is
+[Redis Agent Memory in Redis Iris](https://redis.io/agent-memory/).
+It is not installed by this Mac quickstart.
 
 ## License
 
-This project is licensed under the **Apache License 2.0** (Redis, Inc.). See
-[`LICENSE`](./LICENSE) at the repository root.
+[Apache License 2.0](./LICENSE).

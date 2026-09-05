@@ -253,6 +253,7 @@ async def test_graph_page_and_assets_are_packaged(client):
 
     assert page.status_code == 200
     assert "Memory Graph" in page.text
+    assert 'id="working-memory-link"' in page.text
     assert "graph.js?v=live-refresh" in page.text
     assert page.headers["cache-control"] == "no-cache"
     assert styles.status_code == 200
@@ -261,6 +262,13 @@ async def test_graph_page_and_assets_are_packaged(client):
     assert script.status_code == 200
     assert script.headers["cache-control"] == "no-cache"
     assert "requestAnimationFrame" in script.text
+    assert 'url.searchParams.set("user_id", workingMemoryUserId)' in script.text
+    assert 'initialParameters.get("memory_id")' in script.text
+    assert "loadGraph(initialMemoryId)" in script.text
+    assert "payload.expected_version = memory.updated_at" in script.text
+    assert "History and undo" in script.text
+    assert "expected_version: history.current_version" in script.text
+    assert 'projectValue: initialParameters.get("project_id") || ""' in script.text
     assert 'id="edit-memory"' in page.text
     assert 'id="delete-memory"' in page.text
     assert ".edit-button[hidden]" in styles.text

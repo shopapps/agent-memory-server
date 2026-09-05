@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Working Memory</title>
+  <style>
+    :root { color-scheme: dark; --canvas: #030914; --surface: #08111f; --surface-raised: #0d1829; --border: #213047; --border-strong: #33445f; --text: #f2f6ff; --muted: #91a0b7; --namespace: #22c7e6; --topic: #f4a620; --entity: #4bd879; font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--canvas); color: var(--text); }
+    * { box-sizing: border-box; }
+    html, body { height: auto; min-height: 100%; overflow: auto; }
+    body { margin: 0; padding: 28px; }
+    button, input, select { font: inherit; color: inherit; }
+    :focus-visible { outline: 2px solid var(--namespace); outline-offset: 3px; }
+    header, .filters { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+    header { justify-content: space-between; }
+    h1 { margin: 0; font-size: 26px; } h2 { font-size: 18px; margin: 0 0 14px; }
+    p { color: var(--muted); line-height: 1.6; max-width: 76ch; }
+    a { color: var(--namespace); }
+    .filters { margin: 24px 0 12px; align-items: end; }
+    label { display: grid; gap: 8px; font-size: 13px; color: var(--muted); }
+    input, select { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 10px; max-width: 100%; }
+    button { background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: 6px; padding: 10px 14px; cursor: pointer; }
+    button:hover { border-color: var(--namespace); } button:disabled { opacity: .5; cursor: wait; }
+    .layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 24px; margin-top: 24px; }
+    .session-list { display: grid; align-content: start; gap: 8px; }
+    .session-list button { text-align: left; overflow-wrap: anywhere; white-space: pre-line; line-height: 1.6; }
+    .session-list button[aria-pressed="true"] { border-color: var(--namespace); background: #102536; }
+    .review { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, .9fr); gap: 28px; }
+    .review > section { min-width: 0; }
+    .exchange { padding: 16px 0; border-bottom: 1px solid var(--border); }
+    .exchange strong { color: var(--namespace); font-size: 13px; }
+    .content, blockquote { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+    .content { margin-top: 8px; font-size: 14px; }
+    .candidate { margin-bottom: 20px; padding: 18px; background: var(--surface); border-left: 3px solid var(--topic); }
+    .candidate[data-status="promoted"] { border-color: var(--entity); }
+    blockquote { margin: 14px 0; padding-left: 12px; border-left: 1px solid var(--border-strong); color: var(--muted); font-size: 13px; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+    .save { color: var(--entity); }
+    .meta { font-size: 13px; color: var(--muted); }
+    #status { min-height: 24px; color: var(--namespace); }
+    #session-heading { margin-bottom: 18px; }
+    .activity { display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0; }
+    .activity span { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px; }
+    details { margin: 16px 0; } summary { cursor: pointer; color: var(--namespace); }
+    [hidden] { display: none !important; }
+    @media (max-width: 1000px) { .review { grid-template-columns: minmax(0, 1fr); } }
+    @media (max-width: 650px) { body { padding: 18px; } .layout { grid-template-columns: minmax(0, 1fr); } .filters label { width: 100%; } .session-list { max-height: 220px; overflow: auto; } }
+  </style>
+</head>
+<body>
+  <header><h1>Working Memory</h1><a id="graph-link" href="/admin/memories/graph">Long-term memory graph</a></header>
+  <p>A short-term workbench for recent project chat. Keep up to 30 exchanges for seven days.
+    Only selected project facts move into the long-term graph.</p>
+  <form id="filters" class="filters">
+    <label>Local user ID<input id="user" required size="38" autocomplete="off" aria-describedby="user-help" placeholder="Use the ID shown by the installer"></label>
+    <label>Project<select id="project"><option value="">All projects</option></select></label>
+    <label>API token (if required)<input id="token" type="password" autocomplete="off" aria-describedby="token-help" placeholder="Kept only in this page"></label>
+    <button type="submit">Load sessions</button>
+  </form>
+  <p id="user-help" class="meta">The installer creates a local user ID to find your recent chats across Codex and Claude.
+    It is a label, not a password or access check. Local installs fill it in from saved settings when available.
+    Otherwise, use the installer's review link or copy <code>userId</code> from <code>ams-working-memory.json</code>
+    in your <code>~/.codex</code> or <code>~/.claude</code> folder (inside the project for project installs).
+    The links between this page and the graph keep this ID.</p>
+  <p id="token-help" class="meta">The API token lets this page read and change memories when your Agent Memory server requires an access token.
+    Leave it blank for the default local setup. It is not your OpenAI API key. This page does not save it or put it in links.</p>
+  <details><summary>Check that saving and recall work</summary>
+    <p>In an agent task, say: “For this test project, our agreed example customer is Copper Finch.
+      Confirm this, but do not save it with memory tools—we are testing automatic capture.”</p>
+    <p>Find that session below. A chat message alone is not a saved fact. Wait for <strong>Saved to long-term</strong>,
+      or approve the suggestion if you use review mode. Then open a new task in the same project and ask:
+      “Search long-term shared memory for our example customer. Give me the name and memory ID. Do not answer from chat alone.”</p>
+    <p>The returned ID should match the saved fact below. No suggestion can also be a valid result: the AI is selective.
+      Delete the disposable test fact from the graph when finished. This page refreshes every ten seconds while visible.</p>
+  </details>
+  <div id="status" role="status" aria-live="polite">Open the review link printed by working-memory install, or enter your local user ID.</div>
+  <div class="layout">
+    <nav id="sessions" class="session-list" aria-label="Working Memory sessions"></nav>
+    <main>
+      <div id="session-heading"><h2>Choose a session</h2><p>Your existing long-term memories are not changed by capture.</p></div>
+      <div id="review" class="review" hidden>
+        <section aria-label="Recent exchanges">
+          <h2>Recent exchanges</h2><div id="messages"></div>
+          <div id="handoff" hidden></div>
+        </section>
+        <section aria-label="Suggested project facts">
+          <h2>Suggested project facts</h2>
+          <p class="meta">AI suggestions can be wrong. Check the source quote before saving. Saved facts are shared with agents in this project.</p>
+          <button id="process" type="button">Filter now / retry</button>
+          <div id="candidates" style="margin-top: 18px"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let selected = null, sessions = [], busy = false, viewVersion = 0, detailSignature = "";
+    function element(tag, text, className) {
+      const node = document.createElement(tag);
+      if (text !== undefined) node.textContent = text;
+      if (className) node.className = className;
+      return node;
+    }
+    async function request(route, body) {
+      const headers = { "Content-Type": "application/json" };
+      if ($("token").value) headers.Authorization = `Bearer ${$("token").value}`;
+      const response = await fetch(`/v1/working-memory-capture/${route}`, {
+        method: body ? "POST" : "GET", headers, cache: "no-store",
+        signal: AbortSignal.timeout(100000), ...(body ? { body: JSON.stringify(body) } : {}),
+      });
+      if (!response.ok) throw new Error(response.status === 401 || response.status === 403
+        ? "Access denied. Enter a valid API token." : `Request failed (${response.status}). Check the server, then retry.`);
+      return response.json();
+    }
+    async function action(work, quiet = false) {
+      if (busy) return;
+      busy = true;
+      if (!quiet) document.querySelectorAll("button").forEach((button) => button.disabled = true);
+      try { await work(); } catch (error) { $("status").textContent = error.message; }
+      finally { busy = false; document.querySelectorAll("button").forEach((button) => button.disabled = false); }
+    }
+    function clearSession() {
+      selected = null;
+      detailSignature = "";
+      $("review").hidden = true;
+      $("messages").replaceChildren(); $("candidates").replaceChildren();
+      $("handoff").replaceChildren(); $("handoff").hidden = true;
+      $("session-heading").replaceChildren(element("h2", "Choose a session"));
+    }
+    function renderSessions() {
+      $("sessions").replaceChildren();
+      for (const session of sessions.filter((s) => !$("project").value || s.project_id === $("project").value)) {
+        const button = element("button", `${session.project_id}\n${session.client} · ${session.messages} messages\n${session.status || "captured"}`);
+        button.type = "button";
+        button.setAttribute("aria-pressed", String(selected?.session_id === session.session_id && selected?.client === session.client && selected?.project_id === session.project_id));
+        button.onclick = () => action(() => showSession(session));
+        $("sessions").append(button);
+      }
+    }
+    async function loadSessions(quiet = false) {
+      const version = viewVersion;
+      if (!quiet) clearSession();
+      const result = await request(`sessions?${new URLSearchParams({ user_id: $("user").value.trim() })}`);
+      if (version !== viewVersion) return;
+      const unchanged = JSON.stringify(sessions) === JSON.stringify(result.sessions);
+      sessions = result.sessions;
+      const previous = $("project").value;
+      if (!quiet || !unchanged) {
+        $("project").replaceChildren(new Option("All projects", ""));
+        [...new Set(sessions.map((s) => s.project_id))].sort().forEach((p) => $("project").add(new Option(p, p)));
+        $("project").value = previous;
+        renderSessions();
+      }
+      if (quiet && selected) {
+        if (sessions.some((s) => s.session_id === selected.session_id && s.client === selected.client && s.project_id === selected.project_id)) {
+          await showSession(selected, true);
+        } else {
+          clearSession();
+          $("status").textContent = "This session expired or is no longer in the recent list.";
+        }
+      } else {
+        $("status").textContent = sessions.length ? `${sessions.length} recent sessions (up to 50 shown). Updates every ten seconds.` : "No recent sessions. Enable capture hooks and start a new agent task.";
+      }
+    }
+    async function showSession(session, quiet = false) {
+      const version = viewVersion;
+      const scope = { session_id: session.session_id, client: session.client, project_id: session.project_id, user_id: session.user_id };
+      const result = await request("session", scope);
+      if (version !== viewVersion) return;
+      selected = scope;
+      const memory = result.memory, state = memory.data.capture;
+      const { expires_in_seconds, ...detail } = result;
+      const signature = JSON.stringify([scope, detail]);
+      const status = `Processing: ${state.status || "pending"}. Updates every ten seconds. Saved facts still need a new-session search to prove recall.`;
+      if ($("status").textContent !== status) $("status").textContent = status;
+      if (quiet && signature === detailSignature) return;
+      detailSignature = signature;
+      for (const saved of sessions) {
+        if (saved.session_id === scope.session_id && saved.project_id === scope.project_id && saved.client === scope.client) {
+          saved.pending = state.candidates.filter((c) => c.status === "pending").length;
+          saved.messages = memory.messages.length;
+        }
+      }
+      renderSessions();
+      $("review").hidden = false;
+      $("session-heading").replaceChildren(element("h2", scope.project_id), element("p",
+        `${scope.client} · ${state.promotion} mode · Expires in about ${Math.max(1, Math.ceil(result.expires_in_seconds / 3600))} hours`, "meta"));
+      const counts = result.counts || {};
+      const activity = element("div", undefined, "activity");
+      for (const [key, label] of [["captured", "Captured"], ["checked", "Checked"], ["awaiting_review", "To review"], ["pending_saves", "Waiting to save"], ["saved", "Saved"]]) {
+        if (counts[key] !== undefined) activity.append(element("span", `${label}: ${counts[key]}`));
+      }
+      $("session-heading").append(activity);
+      for (const [key, label] of [["last_received_at", "Last capture"], ["last_filtered_at", "Last check"], ["last_saved_at", "Last save"], ["last_recalled_at", "Last saved-fact context returned"]]) {
+        const date = result[key];
+        if (date) $("session-heading").append(element("p", `${label}: ${new Date(date).toLocaleString()}`, "meta"));
+      }
+      if (result.last_recall_count !== undefined && result.last_recall_count !== null) {
+        $("session-heading").append(element("p", `${result.last_recall_count} saved facts returned on the last lookup. This does not prove the agent used them.`, "meta"));
+      }
+      if (result.daily_filter_usage) {
+        const usage = result.daily_filter_usage;
+        $("session-heading").append(element("p",
+          `AI filtering today (${usage.date}, UTC): ${usage.total_tokens} reported tokens across ${usage.calls} calls. ` +
+          `Daily pause threshold: ${usage.limit || "not set"}. Model: ${usage.model}. ` +
+          `${usage.unmeasured_calls} calls have unknown usage. Embeddings and other agent calls are not included.`, "meta"));
+      }
+      $("messages").replaceChildren();
+      for (const message of memory.messages) {
+        const entry = element("article", undefined, "exchange");
+        entry.append(element("strong", message.role === "user" ? "You" : "Agent"), element("div", message.content, "content"));
+        $("messages").append(entry);
+      }
+      const handoff = state.handoff || [];
+      $("handoff").hidden = handoff.length === 0;
+      $("handoff").replaceChildren();
+      if (handoff.length) {
+        $("handoff").append(element("h2", "Earlier handoff excerpts"), element("p",
+          "Small notes from earlier user-backed suggestions, not a new AI summary. They are not proof of a long-term save. Check them before use; they expire within seven days of their source.", "meta"));
+        for (const item of handoff) {
+          const entry = element("article", undefined, "exchange");
+          entry.append(element("div", item.text, "content"), element("blockquote", item.evidence), element("p",
+            `Source: ${new Date(item.source_created_at).toLocaleString()} · Expires: ${new Date(item.expires_at).toLocaleString()}`, "meta"));
+          const forget = element("button", "Forget excerpt");
+          forget.type = "button";
+          forget.onclick = () => action(async () => {
+            const version = viewVersion;
+            await request("decision", { ...scope, candidate_id: item.id, action: "dismiss" });
+            if (version !== viewVersion) return;
+            await showSession(scope);
+            if (version !== viewVersion) return;
+            $("status").textContent = "Handoff excerpt removed. Long-term memories were not changed.";
+          });
+          entry.append(forget);
+          $("handoff").append(entry);
+        }
+      }
+      $("candidates").replaceChildren();
+      if (!state.candidates.length) $("candidates").append(element("p", "No suggested facts yet. Small talk and temporary work may produce none."));
+      for (const candidate of state.candidates) {
+        const entry = element("article", undefined, "candidate");
+        entry.dataset.status = candidate.status;
+        const label = candidate.status === "promoted" ? "Saved to long-term" : candidate.status === "pending" ? "Waiting / needs review" : "Dismissed";
+        entry.append(element("span", `${candidate.category} · ${label}`, "meta"),
+          element("div", candidate.text, "content"), element("blockquote", candidate.evidence));
+        if (candidate.status === "promoted") {
+          const link = element("a", `View saved fact: ${candidate.id}`);
+          const url = new URL("/admin/memories/graph", location.origin);
+          url.search = new URLSearchParams({ user_id: scope.user_id, project_id: scope.project_id, memory_id: candidate.id });
+          link.href = url.href;
+          link.className = "content";
+          entry.append(link);
+        }
+        if (candidate.status === "pending") {
+          const controls = element("div", undefined, "actions");
+          for (const [name, label] of [["promote", "Save to long-term"], ["dismiss", "Dismiss"]]) {
+            const button = element("button", label, name === "promote" ? "save" : "");
+            button.type = "button";
+            button.onclick = () => action(async () => {
+              if (name === "promote" && !confirm("Share this fact with agents in this project and add it to the long-term graph?")) return;
+              await request("decision", { ...scope, candidate_id: candidate.id, action: name });
+              await showSession(scope);
+              $("status").textContent = name === "promote" ? "Saved to long-term memory. The graph will pick it up on its next refresh." : "Suggestion dismissed.";
+            });
+            controls.append(button);
+          }
+          entry.append(controls);
+        }
+        $("candidates").append(entry);
+      }
+    }
+    $("filters").onsubmit = (event) => { event.preventDefault(); viewVersion++; action(() => loadSessions()); };
+    $("project").onchange = () => { viewVersion++; clearSession(); renderSessions(); };
+    $("process").onclick = () => action(async () => {
+      if (!selected) return;
+      await request("process", selected);
+      $("status").textContent = "Filtering queued. This page will update when the result is ready.";
+    });
+    function updateGraphLink() {
+      const url = new URL("/admin/memories/graph", location.origin);
+      const userId = $("user").value.trim();
+      if (userId) url.searchParams.set("user_id", userId);
+      $("graph-link").href = url.href;
+    }
+    $("user").value = new URLSearchParams(location.search).get("user_id") ?? $("user").value;
+    $("user").addEventListener("input", () => { viewVersion++; clearSession(); sessions = []; renderSessions(); updateGraphLink(); });
+    $("token").addEventListener("input", () => { viewVersion++; });
+    updateGraphLink();
+    if ($("user").value) action(() => loadSessions());
+    async function poll() {
+      if (!document.hidden && navigator.onLine !== false && $("user").value.trim()
+          && !document.activeElement?.matches("input, select") && !window.getSelection()?.toString()) {
+        await action(() => loadSessions(true), true);
+      }
+      window.setTimeout(poll, 10000);
+    }
+    window.setTimeout(poll, 10000);
+  </script>
+</body>
+</html>

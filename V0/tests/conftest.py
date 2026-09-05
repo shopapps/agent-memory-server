@@ -421,6 +421,10 @@ def use_test_redis_connection(redis_url):
         patch("agent_memory_server.api.get_redis_conn", mock_get_redis_conn),
         patch("agent_memory_server.working_memory.get_redis_conn", mock_get_redis_conn),
         patch(
+            "agent_memory_server.working_memory_capture.get_redis_conn",
+            mock_get_redis_conn,
+        ),
+        patch(
             "agent_memory_server.long_term_memory.get_redis_conn", mock_get_redis_conn
         ),
         patch("agent_memory_server.summary_views.get_redis_conn", mock_get_redis_conn),

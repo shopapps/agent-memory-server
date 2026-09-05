@@ -10,6 +10,8 @@ from agent_memory_server.models import MemoryRecord, MemoryRecordResult
 
 # Seconds per day constant for time calculations
 SECONDS_PER_DAY = 86400.0
+ACCESS_COUNT_CAP = 100
+ACCESS_COUNT_BOOST = 0.15
 
 
 def generate_memory_hash(memory: MemoryRecord) -> str:
@@ -132,7 +134,12 @@ def score_recency(
     - freshness decays with last_accessed using half-life `half_life_last_access_days`
     - novelty decays with created_at using half-life `half_life_created_days`
     - recency = freshness_weight * freshness + novelty_weight * novelty
+    - pinned memories keep the full recency component regardless of age
+    - read counts add a capped boost, not a claim that a fact is correct
     """
+    if memory.pinned:
+        return 1.0
+
     half_life_last_access = max(
         float(params.get("half_life_last_access_days", 7.0)), 0.001
     )
@@ -152,7 +159,11 @@ def score_recency(
     novelty = exp(-creation_decay_rate * days_since_created)
 
     recency_score = freshness_weight * freshness + novelty_weight * novelty
-    return min(max(recency_score, 0.0), 1.0)
+    recency_score = min(max(recency_score, 0.0), 1.0)
+    count = min(max(memory.access_count, 0), ACCESS_COUNT_CAP)
+    frequency = log(1 + count) / log(1 + ACCESS_COUNT_CAP)
+    boost = ACCESS_COUNT_BOOST if params.get("include_access_count", True) else 0.0
+    return recency_score + boost * frequency * (1.0 - recency_score)
 
 
 def rerank_with_recency(

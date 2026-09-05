@@ -27,6 +27,7 @@ from agent_memory_server.summary_views import (
     refresh_summary_view,
 )
 from agent_memory_server.utils.redis import redis_url_for_docket
+from agent_memory_server.working_memory_capture import process_capture
 
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 # Register functions in the task collection for the CLI worker
 task_collection = [
+    process_capture,
     extract_memory_structure,
     summarize_session,
     index_long_term_memories,

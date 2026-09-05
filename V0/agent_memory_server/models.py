@@ -1159,6 +1159,11 @@ class DeleteMemoryRecordRequest(BaseModel):
 class EditMemoryRecordRequest(BaseModel):
     """Payload for editing a memory record"""
 
+    expected_version: datetime | None = Field(
+        default=None,
+        description="Optional updated_at value last read; stale edits return 409",
+    )
+
     text: str | None = Field(
         default=None, description="Updated text content for the memory"
     )
@@ -1219,6 +1224,29 @@ class EditMemoryRecordRequest(BaseModel):
         if value is not None and "," in value:
             raise ValueError("scope IDs must not contain commas")
         return value
+
+
+class MemoryHistoryEntry(BaseModel):
+    version: datetime
+    replaced_by: datetime
+    fields: dict[str, JSONTypes]
+    metadata: dict[str, JSONTypes] = Field(default_factory=dict)
+
+
+class MemoryHistoryResponse(BaseModel):
+    memory_id: str
+    current_version: datetime
+    entries: list[MemoryHistoryEntry] = Field(default_factory=list)
+
+
+class UndoMemoryRequest(BaseModel):
+    version: datetime = Field(description="History version to restore")
+    expected_version: datetime = Field(description="Current updated_at value last read")
+
+
+class RestoreMemoriesRequest(BaseModel):
+    project_id: str = Field(min_length=1)
+    memories: list[MemoryRecord] = Field(min_length=1, max_length=100)
 
 
 class TaskStatusEnum(str, Enum):

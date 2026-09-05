@@ -5,13 +5,19 @@
 
 A memory layer for AI agents.
 
+This is the source and developer guide for the **Shopapps fork**. For its
+features and two-command Mac setup, start with the [main README](../README.md).
+
   **[Documentation](docs/index.md)** • **[GitHub](https://github.com/redis/agent-memory-server)** • **[Docker](https://hub.docker.com/r/redislabs/agent-memory-server)**
 
 </div>
 
 
 >
-> This is the original reference implementation of Redis Agent Memory Server. It remains a useful reference and starting point for understanding agent memory, but **it is no longer actively maintained and is not the supported production path.**
+> Upstream V0 is the original research implementation of Redis Agent Memory
+> Server, not Redis's supported production path. This Shopapps fork adds the
+> local installer, memory graph and capture workflow described in the
+> [main README](../README.md); it is under active development.
 >
 > For production use, Redis’s official managed path is **[Redis Agent Memory in Redis Iris](https://redis.io/agent-memory/)**, the same two-tier memory model delivered as a managed service, with dedicated endpoints, secure API key management, configurable schemas, and automatic TTL-based lifecycle management, so you don't have to build and operate the memory infrastructure yourself.
 >
@@ -47,6 +53,10 @@ safe reset, start, and restart commands.
 `npx --yes ./V0/installer docker:install` remains available as a fallback.
 The installer is not published to npm.
 
+For automatic short-term capture, add `--working-memory` to the install command.
+The [Working Memory guide](../INSTALL.md#working-memory) covers recent-chat
+review, privacy, expiry, and optional promotion of project facts to the graph.
+
 After the server starts, open the local API docs at
 [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
@@ -69,6 +79,10 @@ short ripple without resetting the current view.
 Pre-built Docker images are available from:
 - **Docker Hub**: [redislabs/agent-memory-server](https://hub.docker.com/r/redislabs/agent-memory-server)
 - **GitHub Packages**: [ghcr.io/redis/agent-memory-server](https://github.com/redis/agent-memory-server/pkgs/container/agent-memory-server)
+
+These are upstream images, not builds of the Shopapps additions. Use
+`./ams docker:install` from the repository root for this fork's current UI and
+capture features.
 
 **Quick Start (Development Mode)**:
 ```bash
@@ -345,7 +359,7 @@ docker compose up api task-worker redis mcp    # Production-like mode
 `make verify` requires `OPENAI_API_KEY` because it runs `make test-api`.
 ## License
 
-Apache License 2.0 - see [LICENSE](LICENSE) file for details.
+Apache License 2.0 - see [LICENSE](../LICENSE) file for details.
 
 ## Contributing
 

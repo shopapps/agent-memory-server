@@ -1,12 +1,30 @@
 """Tests for the MemoryVectorDatabase abstraction."""
 
+import asyncio
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
+from redisvl.index import AsyncSearchIndex
 
-from agent_memory_server.filters import ExtractionStrategy
+from agent_memory_server.filters import (
+    AgentId,
+    ExtractionStrategy,
+    ProjectId,
+    SessionId,
+    UserId,
+)
+from agent_memory_server.long_term_memory import (
+    get_long_term_memory_by_id,
+    get_long_term_memory_history,
+    restore_long_term_memories,
+    undo_long_term_memory,
+    update_long_term_memory,
+)
 from agent_memory_server.memory_vector_db import (
     MemoryVectorDatabase,
+    MemoryVersionConflictError,
     PhraseAwareAggregateHybridQuery,
     PhraseAwareTextQuery,
     RedisVLMemoryVectorDatabase,
@@ -47,6 +65,214 @@ class MockEmbeddings:
 
 class TestMemoryVectorDatabase:
     """Test cases for MemoryVectorDatabase functionality."""
+
+    @pytest.mark.asyncio
+    async def test_filter_listing_pages_all_shared_project_facts(self, requires_redis):
+        schema = _build_redis_schema()
+        identity = "pagination-test-" + uuid4().hex
+        schema["index"].update(name=identity, prefix=identity)
+        db = RedisVLMemoryVectorDatabase(
+            AsyncSearchIndex.from_dict(schema, redis_client=requires_redis),
+            MockEmbeddings(),
+        )
+        records = [
+            MemoryRecord(
+                id=f"fact-{number}", text=f"Convention {number}", project_id="project-a"
+            )
+            for number in range(101)
+        ]
+        await db.add_memories(
+            records
+            + [
+                MemoryRecord(
+                    id="private-fact",
+                    text="Private context",
+                    project_id="project-a",
+                    user_id="private-user",
+                ),
+                MemoryRecord(
+                    id="other-project", text="Other context", project_id="project-b"
+                ),
+            ]
+        )
+        filters = {
+            "project_id": ProjectId(eq="project-a"),
+            "user_id": UserId(eq="__shared__"),
+            "agent_id": AgentId(eq="__shared__"),
+            "session_id": SessionId(eq="__shared__"),
+        }
+        first = await db.list_memories(limit=100, **filters)
+        assert len(first.memories) == 100
+        assert first.next_offset == 100
+        second = await db.list_memories(limit=100, offset=first.next_offset, **filters)
+        assert len(second.memories) == 1
+        assert second.next_offset is None
+        assert second.total == 101
+        assert {memory.id for memory in first.memories + second.memories} == {
+            memory.id for memory in records
+        }
+
+    @pytest.mark.asyncio
+    async def test_restore_is_shared_project_only_and_create_only(self, requires_redis):
+        schema = _build_redis_schema()
+        identity = "restore-test-" + uuid4().hex
+        schema["index"].update(name=identity, prefix=identity)
+        db = RedisVLMemoryVectorDatabase(
+            AsyncSearchIndex.from_dict(schema, redis_client=requires_redis),
+            MockEmbeddings(),
+        )
+        record = MemoryRecord(id="restored", text="PHP 8.4", project_id="project-a")
+        await db._ensure_index()
+        with patch(
+            "agent_memory_server.long_term_memory.get_memory_vector_db", return_value=db
+        ):
+            outcomes = await asyncio.gather(
+                *[restore_long_term_memories("project-a", [record]) for _ in range(2)],
+                return_exceptions=True,
+            )
+            assert outcomes.count(1) == 1
+            assert (
+                sum(
+                    isinstance(result, MemoryVersionConflictError)
+                    for result in outcomes
+                )
+                == 1
+            ), outcomes
+            persisted = await get_long_term_memory_by_id("restored")
+            assert persisted.created_at == record.created_at
+            assert persisted.updated_at == record.updated_at
+            fresh = record.model_copy(update={"id": "fresh"})
+            with pytest.raises(MemoryVersionConflictError):
+                await restore_long_term_memories(
+                    "project-a",
+                    [fresh, record.model_copy(update={"text": "Wrong replacement"})],
+                )
+            assert await get_long_term_memory_by_id("fresh") is None
+            assert (await get_long_term_memory_by_id("restored")).text == "PHP 8.4"
+            for changed in [
+                {"project_id": "other-project"},
+                {"user_id": "private"},
+                {"agent_id": "private"},
+                {"session_id": "private"},
+            ]:
+                with pytest.raises(ValueError, match="shared facts"):
+                    await restore_long_term_memories(
+                        "project-a", [fresh.model_copy(update=changed)]
+                    )
+
+    @pytest.mark.asyncio
+    async def test_edit_history_undo_and_concurrent_versions(self, requires_redis):
+        schema = _build_redis_schema()
+        identity = "history-test-" + uuid4().hex
+        schema["index"].update(name=identity, prefix=identity)
+        index = AsyncSearchIndex.from_dict(schema, redis_client=requires_redis)
+        embeddings = MockEmbeddings()
+        embeddings.aembed_documents = AsyncMock(wraps=embeddings.aembed_documents)
+        db = RedisVLMemoryVectorDatabase(index, embeddings)
+        original = MemoryRecord(
+            id="fact",
+            text="PHP 8.3 legacy83",
+            project_id="private-project",
+            user_id="private-user",
+            metadata={"source": "checked-file"},
+        )
+        await db.add_memories([original])
+        with patch(
+            "agent_memory_server.long_term_memory.get_memory_vector_db", return_value=db
+        ):
+            first = await get_long_term_memory_by_id("fact")
+            assert (
+                first.updated_at
+                == db._data_to_memory_result(await index.fetch("fact")).updated_at
+            )
+            changed = await update_long_term_memory(
+                "fact", {"text": "PHP 8.4 current84"}, expected_version=first.updated_at
+            )
+            assert changed.updated_at > first.updated_at
+            history = await get_long_term_memory_history("fact")
+            assert history.entries[0].fields["text"] == original.text
+            assert history.entries[0].metadata == original.metadata
+            assert not (
+                await db.search_memories("legacy83", search_mode=SearchModeEnum.KEYWORD)
+            ).memories
+            assert (
+                len(
+                    (
+                        await db.search_memories(
+                            "current84", search_mode=SearchModeEnum.KEYWORD
+                        )
+                    ).memories
+                )
+                == 1
+            )
+            restored = await undo_long_term_memory(
+                "fact", first.updated_at, changed.updated_at
+            )
+            assert restored.text == original.text
+            assert embeddings.aembed_documents.await_args.args[0] == [original.text]
+            assert restored.updated_at > changed.updated_at
+            outcomes = await asyncio.gather(
+                *[
+                    update_long_term_memory(
+                        "fact", {"text": text}, expected_version=restored.updated_at
+                    )
+                    for text in ("First concurrent edit", "Second concurrent edit")
+                ],
+                return_exceptions=True,
+            )
+            assert (
+                sum(
+                    isinstance(result, MemoryVersionConflictError)
+                    for result in outcomes
+                )
+                == 1
+            )
+            current = await get_long_term_memory_by_id("fact")
+            # A repeated/backwards clock still produces a distinct edit version.
+            clock = MagicMock(wraps=datetime)
+            clock.now.return_value = current.updated_at
+            with patch("agent_memory_server.long_term_memory.datetime", clock):
+                tick = await update_long_term_memory(
+                    "fact", {"pinned": True}, expected_version=current.updated_at
+                )
+            assert tick.updated_at > current.updated_at
+            for number in range(22):
+                await update_long_term_memory("fact", {"text": f"Revision {number}"})
+            assert len((await get_long_term_memory_history("fact")).entries) == 20
+            current = await get_long_term_memory_by_id("fact")
+            assert (
+                await db.get_memory_history(
+                    current.model_copy(update={"project_id": "other-project"})
+                )
+                == []
+            )
+            assert await requires_redis.llen(db._history_key("fact")) == 20
+            # Reusing an ID must not reveal private old fields or allow old undo.
+            assert await db.delete_memories(["fact"]) == 1
+            assert await requires_redis.exists(db._history_key("fact")) == 0
+            await db.add_memories(
+                [
+                    MemoryRecord(
+                        id="fact", text="New shared fact", project_id="public-project"
+                    )
+                ]
+            )
+            assert (await get_long_term_memory_history("fact")).entries == []
+            reused = await get_long_term_memory_by_id("fact")
+            with pytest.raises(ValueError, match="not available"):
+                await undo_long_term_memory("fact", first.updated_at, reused.updated_at)
+            # An unrelated overwrite breaks the revision chain, even with the same scope and creation date.
+            await update_long_term_memory("fact", {"text": "Shared correction"})
+            replacement = reused.model_copy(
+                update={
+                    "text": "Unrelated replacement",
+                    "updated_at": datetime.now(UTC) + timedelta(seconds=1),
+                }
+            )
+            await db.add_memories([replacement])
+            assert (await get_long_term_memory_history("fact")).entries == []
+            await update_long_term_memory("fact", {"text": "Correction to replacement"})
+            assert len((await get_long_term_memory_history("fact")).entries) == 1
 
     @pytest.mark.asyncio
     async def test_existing_index_is_rebuilt_for_v1_scope_fields(self):
@@ -408,7 +634,7 @@ class TestMemoryVectorDatabase:
 
     @pytest.mark.asyncio
     async def test_delete_memories(self):
-        """Test delete_memories calls drop_documents."""
+        """Delete current keys and history, but count only current facts."""
         mock_index = MagicMock()
         mock_index.exists = AsyncMock(return_value=True)
         mock_index.info = AsyncMock(
@@ -416,14 +642,23 @@ class TestMemoryVectorDatabase:
                 "attributes": [{"attribute": "project_id"}, {"attribute": "agent_id"}]
             }
         )
-        mock_index.drop_documents = AsyncMock(return_value=2)
+        mock_index.key.side_effect = lambda memory_id: f"memory:{memory_id}"
+        pipeline = MagicMock()
+        pipeline.__aenter__.return_value = pipeline
+        pipeline.execute = AsyncMock(return_value=[1, 1, 1, 0])
+        mock_index.client.pipeline.return_value = pipeline
         mock_embeddings = MockEmbeddings()
 
         db = RedisVLMemoryVectorDatabase(mock_index, mock_embeddings)
 
         deleted = await db.delete_memories(["mem1", "mem2"])
 
-        mock_index.drop_documents.assert_called_once_with(["mem1", "mem2"])
+        assert [call.args[0] for call in pipeline.delete.call_args_list] == [
+            "memory:mem1",
+            db._history_key("mem1"),
+            "memory:mem2",
+            db._history_key("mem2"),
+        ]
         assert deleted == 2
 
     @pytest.mark.asyncio

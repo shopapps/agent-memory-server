@@ -22,6 +22,9 @@ from agent_memory_server.utils.redis import (
     get_redis_conn,
 )
 from agent_memory_server.working_memory import check_and_set_migration_status
+from agent_memory_server.working_memory_capture import (
+    router as working_memory_capture_router,
+)
 from agent_memory_server.working_memory_index import ensure_working_memory_index
 
 
@@ -130,6 +133,7 @@ app = FastAPI(
 app.include_router(health_router)
 app.include_router(memory_router)
 app.include_router(admin_graph_router)
+app.include_router(working_memory_capture_router)
 
 
 def on_start_logger(port: int):

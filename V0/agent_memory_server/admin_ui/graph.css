@@ -75,6 +75,12 @@ canvas:focus-visible {
   min-width: 0;
 }
 
+.working-memory-link {
+  color: var(--namespace);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
 .app-header {
   display: flex;
   align-items: center;

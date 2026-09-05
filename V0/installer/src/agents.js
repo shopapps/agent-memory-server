@@ -20,10 +20,20 @@ export async function detectAgents(system) {
       });
       if (result.code === 0) {
         detected.push(agent);
+        continue;
       }
     } catch (error) {
       if (error && error.code !== "ENOENT") {
         throw error;
+      }
+    }
+    if (agent === "codex" && system.platform === "darwin") {
+      for (const directory of ["/Applications", path.join(system.home, "Applications")]) {
+        const app = await system.lstatSafe(path.join(directory, "Codex.app"));
+        if (app?.isDirectory()) {
+          detected.push(agent);
+          break;
+        }
       }
     }
   }
@@ -94,17 +104,25 @@ export async function moveOwnedSkill(system, target, backupDir) {
 
 export async function inspectMcp(system, agent, options) {
   if (agent === "codex" && options.scope === "project") {
-    return inspectCodexProject(system, options);
+    return inspectCodexConfig(system, options);
   }
 
   const command = agent;
   const args = agent === "codex"
     ? ["mcp", "get", options.name, "--json"]
     : ["mcp", "get", options.name];
-  const result = await system.run(command, args, {
-    cwd: options.scope === "user" ? system.home : options.projectDir,
-    env: system.env,
-  });
+  let result;
+  try {
+    result = await system.run(command, args, {
+      cwd: options.scope === "user" ? system.home : options.projectDir,
+      env: system.env,
+    });
+  } catch (error) {
+    if (agent === "codex" && error?.code === "ENOENT") {
+      return inspectCodexConfig(system, options);
+    }
+    throw error;
+  }
 
   if (result.code !== 0) {
     if (isMissingMcp(result.stderr + result.stdout)) {
@@ -142,14 +160,14 @@ export async function installMcp(system, agent, options) {
     );
   }
   if (inspection.status === "matching") {
-    if (agent === "codex" && options.scope === "project" && inspection.legacy) {
-      await installCodexProject(system, options);
+    if (agent === "codex" && inspection.configPath && inspection.legacy) {
+      await installCodexConfig(system, options);
     }
     return { created: false, url: options.url };
   }
 
-  if (agent === "codex" && options.scope === "project") {
-    await installCodexProject(system, options);
+  if (agent === "codex" && inspection.configPath) {
+    await installCodexConfig(system, options);
     return { created: true, url: options.url };
   }
 
@@ -181,16 +199,24 @@ export async function installMcp(system, agent, options) {
 
 export async function removeOwnedMcp(system, agent, options) {
   if (agent === "codex" && options.scope === "project") {
-    return removeCodexProject(system, options);
+    return removeCodexConfig(system, options);
   }
 
   const args = agent === "codex"
     ? ["mcp", "remove", options.name]
     : ["mcp", "remove", "--scope", options.scope, options.name];
-  const result = await system.run(agent, args, {
-    cwd: options.projectDir,
-    env: system.env,
-  });
+  let result;
+  try {
+    result = await system.run(agent, args, {
+      cwd: options.projectDir,
+      env: system.env,
+    });
+  } catch (error) {
+    if (agent === "codex" && error?.code === "ENOENT") {
+      return removeCodexConfig(system, options);
+    }
+    throw error;
+  }
   if (result.code !== 0 && !isMissingMcp(result.stderr + result.stdout)) {
     throw new InstallerError(
       "E_AGENT_CONFIG",
@@ -201,11 +227,23 @@ export async function removeOwnedMcp(system, agent, options) {
   return result.code === 0;
 }
 
-async function inspectCodexProject(system, options) {
-  const configPath = path.join(options.projectDir, ".codex", "config.toml");
+function codexConfigPath(system, options) {
+  const directory = options.scope === "project"
+    ? path.join(options.projectDir, ".codex")
+    : system.env.CODEX_HOME
+      ? path.resolve(system.env.CODEX_HOME)
+      : path.join(system.home, ".codex");
+  return path.join(directory, "config.toml");
+}
+
+async function inspectCodexConfig(system, options) {
+  const configPath = codexConfigPath(system, options);
   const stat = await system.lstatSafe(configPath);
   if (!stat) {
     return { configPath, status: "absent" };
+  }
+  if (stat.isSymbolicLink()) {
+    throw new InstallerError("E_MCP_CONFLICT", `Refusing to replace linked config ${configPath}.`);
   }
   const content = await system.readFile(configPath, "utf8");
   const managed = managedCodexBlock(content);
@@ -231,8 +269,8 @@ async function inspectCodexProject(system, options) {
   };
 }
 
-async function installCodexProject(system, options) {
-  const configPath = path.join(options.projectDir, ".codex", "config.toml");
+async function installCodexConfig(system, options) {
+  const configPath = codexConfigPath(system, options);
   const existingStat = await system.lstatSafe(configPath);
   const existing = existingStat ? await system.readFile(configPath, "utf8") : "";
   const block = [
@@ -254,20 +292,21 @@ async function installCodexProject(system, options) {
   );
 }
 
-async function removeCodexProject(system, options) {
-  const configPath = path.join(options.projectDir, ".codex", "config.toml");
+async function removeCodexConfig(system, options) {
+  const configPath = codexConfigPath(system, options);
   const existingStat = await system.lstatSafe(configPath);
   if (!existingStat) {
     return false;
+  }
+  if (existingStat.isSymbolicLink()) {
+    throw new InstallerError("E_MCP_CONFLICT", `Refusing to replace linked config ${configPath}.`);
   }
   const existing = await system.readFile(configPath, "utf8");
   const managed = managedCodexBlock(existing);
   if (!managed) {
     return false;
   }
-  const updated = (
-    existing.slice(0, managed.start) + existing.slice(managed.end)
-  ).replace(/\n{3,}/g, "\n\n");
+  const updated = existing.slice(0, managed.start) + existing.slice(managed.end);
   await system.writeFileAtomic(configPath, updated, existingStat.mode & 0o777);
   return true;
 }
@@ -346,16 +385,18 @@ function parseCodexMcp(value) {
 }
 
 function findTomlSection(content, sectionName) {
-  const header = `[${sectionName}]`;
-  const start = content.indexOf(header);
-  if (start < 0) {
+  const headers = [...content.matchAll(/^[ \t]*\[([^\]\r\n]+)\][ \t]*(?:#.*)?$/gm)];
+  const matches = headers.filter((header) => header[1].split(".")
+    .map((part) => part.trim().replace(/^["']|["']$/g, "")).join(".") === sectionName);
+  if (matches.length > 1) {
+    throw new InstallerError("E_MCP_CONFLICT", "More than one matching Codex MCP section was found.");
+  }
+  if (!matches.length) {
     return null;
   }
-  const afterHeader = start + header.length;
-  const rest = content.slice(afterHeader);
-  const nextHeader = rest.search(/^\[/m);
-  const end = nextHeader < 0 ? content.length : afterHeader + nextHeader;
-  return content.slice(start, end);
+  const start = matches[0].index;
+  const next = headers.find((header) => header.index > start);
+  return content.slice(start, next?.index ?? content.length);
 }
 
 function findUrlInText(value) {
@@ -367,7 +408,7 @@ function findScopeInText(value) {
 }
 
 function findUrlInToml(value) {
-  const match = value.match(/^url\s*=\s*["']([^"']+)["']/m);
+  const match = value.match(/^[ \t]*url\s*=\s*["']([^"']+)["']/m);
   return match?.[1] ?? null;
 }
 

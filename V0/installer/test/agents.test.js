@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { inspectMcp, installMcp, skillTargetPath } from "../src/agents.js";
+import { detectAgents, inspectMcp, installMcp, removeOwnedMcp, skillTargetPath } from "../src/agents.js";
 import { createSystem } from "../src/system.js";
 
 test("uses the current Codex and Claude Skill paths", () => {
@@ -16,6 +16,72 @@ test("uses the current Codex and Claude Skill paths", () => {
     skillTargetPath("claude", "project", "/Users/dev", "/repo"),
     "/repo/.claude/skills/shared-memory",
   );
+});
+
+test("detects Codex Desktop in either Applications directory when CLI is absent", async () => {
+  for (const installed of ["/Applications/Codex.app", "/Users/dev/Applications/Codex.app", null]) {
+    const calls = [];
+    const system = {
+      env: {}, home: "/Users/dev", platform: "darwin",
+      run: async (command, args) => {
+        calls.push([command, args]);
+        throw Object.assign(new Error("not installed"), { code: "ENOENT" });
+      },
+      lstatSafe: async (target) => target === installed ? { isDirectory: () => true } : null,
+    };
+    assert.deepEqual(await detectAgents(system), installed ? ["codex"] : []);
+    assert.equal(calls.every(([, args]) => args[0] === "--version"), true);
+  }
+});
+
+test("Desktop-only MCP setup preserves user config and honors CODEX_HOME", async () => {
+  for (const customHome of [false, true]) {
+    const home = await mkdtemp(path.join(os.tmpdir(), "agent-memory-desktop-"));
+    const directory = path.join(home, customHome ? "custom-codex" : ".codex");
+    const configPath = path.join(directory, "config.toml");
+    const calls = [];
+    const system = createSystem({ home, env: customHome ? { CODEX_HOME: directory } : {},
+      run: async (command, args) => {
+        calls.push([command, args]);
+        throw Object.assign(new Error("not installed"), { code: "ENOENT" });
+      } });
+    const original = "# My settings\nmodel = \"gpt-5\"\n\n\n[features]\nexample = true\n";
+    await system.writeFileAtomic(configPath, original, 0o600);
+    const options = { name: "shared-memory", scope: "user", projectDir: path.join(home, "repo"), url: "http://127.0.0.1:9050/mcp" };
+    assert.equal((await installMcp(system, "codex", options)).created, true);
+    const installed = await readFile(configPath, "utf8");
+    assert.equal(installed.startsWith(original), true);
+    assert.equal((await installMcp(system, "codex", options)).created, false);
+    assert.equal(await readFile(configPath, "utf8"), installed);
+    assert.equal((await inspectMcp(system, "codex", options)).status, "matching");
+    assert.equal((await stat(configPath)).mode & 0o777, 0o600);
+    assert.equal(await removeOwnedMcp(system, "codex", options), true);
+    assert.equal(await readFile(configPath, "utf8"), original);
+    assert.equal(await removeOwnedMcp(system, "codex", options), false);
+    assert.equal(calls.some(([, args]) => args[1] === "add"), false);
+    if (customHome) assert.equal(await system.lstatSafe(path.join(home, ".codex")), null);
+  }
+});
+
+test("Desktop-only setup keeps foreign quoted MCP tables and linked files untouched", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "agent-memory-desktop-conflict-"));
+  const system = createSystem({ home, env: {}, run: async () => {
+    throw Object.assign(new Error("not installed"), { code: "ENOENT" });
+  } });
+  const configPath = path.join(home, ".codex", "config.toml");
+  const foreign = '[mcp_servers."shared-memory"]\n  url = "http://127.0.0.1:9999/mcp"\n';
+  await system.writeFileAtomic(configPath, foreign);
+  const options = { name: "shared-memory", scope: "user", url: "http://127.0.0.1:9050/mcp" };
+  await assert.rejects(installMcp(system, "codex", options), { code: "E_MCP_CONFLICT" });
+  assert.equal(await removeOwnedMcp(system, "codex", options), false);
+  assert.equal(await readFile(configPath, "utf8"), foreign);
+  const linkedHome = path.join(home, "linked-codex");
+  await system.mkdir(linkedHome);
+  await system.symlink(configPath, path.join(linkedHome, "config.toml"));
+  system.env.CODEX_HOME = linkedHome;
+  await assert.rejects(installMcp(system, "codex", options), { code: "E_MCP_CONFLICT" });
+  await assert.rejects(removeOwnedMcp(system, "codex", options), { code: "E_MCP_CONFLICT" });
+  assert.equal(await readFile(configPath, "utf8"), foreign);
 });
 
 test("adds a marked Codex project block without replacing existing TOML", async () => {
