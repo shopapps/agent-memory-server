@@ -255,6 +255,8 @@ async def test_graph_page_and_assets_are_packaged(client):
     assert views.status_code == view_styles.status_code == 200
     assert views.headers["cache-control"] == "no-cache"
     assert "createGraphViews" in views.text
+    assert 'aria-label="Saved views" hidden' in views.text
+    assert 'aria-expanded="false" aria-controls="views-drawer"' in views.text
     assert "ams-graph-views-v1:" in views.text
     assert "graph-views.css" in page.text
     assert "#edit-memory" not in view_styles.text

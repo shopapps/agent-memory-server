@@ -4,11 +4,11 @@ const extras = document.createElement('div');
 extras.className = 'extra-filters';
 extras.hidden = true;
 for (const element of [...toolbar.children].slice(1)) extras.append(element);
-toolbar.insertAdjacentHTML('afterbegin', '<button id="views-toggle" class="view-button primary" aria-expanded="true" aria-controls="views-drawer">Views</button><select id="active-view" class="view-button" aria-label="Switch saved view"></select>');
+toolbar.insertAdjacentHTML('afterbegin', '<button id="views-toggle" class="view-button primary" aria-expanded="false" aria-controls="views-drawer">Views</button><select id="active-view" class="view-button" aria-label="Switch saved view"></select>');
 toolbar.insertAdjacentHTML('beforeend', '<button id="filters-toggle" class="view-button" aria-expanded="false">Filters</button>');
 toolbar.append(extras);
 document.querySelector('.workspace').insertAdjacentHTML('beforeend', `
-  <aside id="views-drawer" class="views-drawer" aria-label="Saved views">
+  <aside id="views-drawer" class="views-drawer" aria-label="Saved views" hidden>
     <div class="drawer-heading"><h2>Saved views</h2><button id="hide-views" class="icon-button" aria-label="Close saved views" title="Close saved views"></button></div>
     <p>Choose a view to edit its projects.</p>
     <section><nav id="saved-views" aria-label="Choose saved view"></nav><button id="new-view" class="view-button add-view"><span aria-hidden="true">+</span> Add View</button></section>
