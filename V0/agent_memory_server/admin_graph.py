@@ -526,3 +526,25 @@ async def memory_graph_script(
         media_type="application/javascript",
         headers={"Cache-Control": "no-cache"},
     )
+
+
+@router.get("/admin/memories/graph/graph-views.js", include_in_schema=False)
+async def memory_graph_views_script(
+    _current_user: UserInfo = Depends(get_current_user),
+):
+    return FileResponse(
+        _UI_DIRECTORY / "graph-views.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@router.get("/admin/memories/graph/graph-views.css", include_in_schema=False)
+async def memory_graph_views_styles(
+    _current_user: UserInfo = Depends(get_current_user),
+):
+    return FileResponse(
+        _UI_DIRECTORY / "graph-views.css",
+        media_type="text/css",
+        headers={"Cache-Control": "no-cache"},
+    )

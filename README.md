@@ -53,6 +53,10 @@ Do not use `npx @shopapps/agent-memory@latest`; that package is not published.
 
 ![An anonymised example of the memory graph](./V0/docs/images/memory-graph-example.png)
 
+Save a **Work** or **Personal** graph view with only the projects you want.
+Switch views from the toolbar; open **Views** to edit them. Saved views stay in
+your browser and never change stored memories. See [saved graph views](./V0/docs/getting-started.md#saved-graph-views).
+
 *Illustration with generic labels—not live project data.*
 
 After install, open:

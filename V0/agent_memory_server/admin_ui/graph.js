@@ -1,3 +1,5 @@
+import { createGraphViews } from './graph-views.js';
+
 const canvas = document.querySelector("#memory-graph");
 const context = canvas.getContext("2d");
 const stage = document.querySelector("#graph-stage");
@@ -81,6 +83,8 @@ const state = {
   loadNumber: 0,
   loadInFlight: false,
 };
+
+const savedViews = location.pathname.endsWith('views-prototype.html') ? null : createGraphViews({ loadGraph, workingMemoryUserId, initialParameters });
 
 motionPreference.addEventListener?.("change", (event) => {
   reducedMotion = event.matches;
@@ -1392,6 +1396,10 @@ async function loadGraph(
   if (searchInput.value.trim()) parameters.set("search", searchInput.value.trim());
 
   try {
+    let data;
+    if (savedViews) {
+      data = await savedViews.loadData(parameters);
+    } else {
     const response = await fetch(`/v1/admin/memories/graph?${parameters}`);
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
@@ -1399,7 +1407,8 @@ async function loadGraph(
       }
       throw new Error(`The memory graph could not load (${response.status}).`);
     }
-    const data = await response.json();
+    data = await response.json();
+    }
     if (loadNumber !== state.loadNumber) return;
     if (
       silent &&
@@ -1421,7 +1430,8 @@ async function loadGraph(
       initialiseGraph(data);
     }
     if (!merge || previousFacets !== nextFacets) {
-      renderProjectTabs(data.facets.projects);
+      if (savedViews) savedViews.updateFacets(data.facets.projects);
+      else renderProjectTabs(data.facets.projects);
       setSelectOptions(namespaceFilter, "All namespaces", data.facets.namespaces);
       setSelectOptions(typeFilter, "All types", data.facets.memory_types);
       setSelectOptions(agentFilter, "All agents", data.facets.agents);

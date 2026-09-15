@@ -70,6 +70,29 @@ Project, namespace, topic, and entity details include links to the memories
 connected to that node. Topic and Entity tags in a memory panel jump to the
 matching node. Larger nodes have more links or longer memory text.
 Coloured halos make node groups easier to see.
+
+### Saved graph views
+
+Use **Views** to open or close the project editor. Choose **+ Add View**, check
+the projects you want, give the view a name (for example, Work), and save it.
+The toolbar dropdown switches between saved views without opening the editor.
+Use the **All projects** checkbox to select everything or clear everything.
+A partly selected checkbox means only some projects are selected. You can still
+untick individual projects. This clears the project search so you can review the full list,
+but does not change **Include new projects**. Save to keep your changes.
+Leave **Include new projects** off to keep a work view limited to checked projects.
+Turn it on to include newly discovered projects while keeping unchecked known
+projects hidden. The trash icon removes a saved view, not its memories; Undo is
+available until reload or another view deletion.
+
+Views and the last chosen view are saved in this browser, separately for each
+`user_id` URL value. They do not sync to other browsers. Prototype views are not
+copied into the live app. Views save project choices only; search, namespace,
+type, agent and node-kind controls remain separate. These are display filters,
+not access controls. Each selected project can return up to 250 memories; a `+`
+beside the count means results were capped. The project list is also capped by
+the server's existing facet scan. Searches narrow the result set.
+
 Browsing uses filter and keyword searches only, so it does not call an AI
 model. Saving an edit rebuilds the memory's search embedding and may use the
 configured embedding provider.

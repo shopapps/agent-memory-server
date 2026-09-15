@@ -250,6 +250,14 @@ async def test_graph_page_and_assets_are_packaged(client):
     page = await client.get("/admin/memories/graph")
     styles = await client.get("/admin/memories/graph/graph.css")
     script = await client.get("/admin/memories/graph/graph.js")
+    views = await client.get("/admin/memories/graph/graph-views.js")
+    view_styles = await client.get("/admin/memories/graph/graph-views.css")
+    assert views.status_code == view_styles.status_code == 200
+    assert views.headers["cache-control"] == "no-cache"
+    assert "createGraphViews" in views.text
+    assert "ams-graph-views-v1:" in views.text
+    assert "graph-views.css" in page.text
+    assert "#edit-memory" not in view_styles.text
 
     assert page.status_code == 200
     assert "Memory Graph" in page.text
@@ -304,6 +312,8 @@ async def test_graph_page_and_assets_require_authentication(client, monkeypatch)
         "/admin/memories/graph",
         "/admin/memories/graph/graph.css",
         "/admin/memories/graph/graph.js",
+        "/admin/memories/graph/graph-views.js",
+        "/admin/memories/graph/graph-views.css",
     ):
         response = await client.get(path)
         assert response.status_code == 401

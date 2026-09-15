@@ -1,6 +1,5 @@
 import contextlib
 import os
-import platform
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -261,7 +260,7 @@ def redis_container(request):
     setting COMPOSE_PROJECT_NAME. That prevents collisions on container/volume
     names.
 
-    Skips container startup if Docker is not available or returns errors.
+    Abort if isolated test Redis cannot start; never use the default database.
     """
     import subprocess
 
@@ -273,13 +272,15 @@ def redis_container(request):
             timeout=10,
         )
         if result.returncode != 0:
-            # Docker not available or not working
-            yield None
-            return
+            pytest.exit(
+                "Docker is unavailable. Start Docker Desktop before running tests.",
+                returncode=2,
+            )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        # Docker not available
-        yield None
-        return
+        pytest.exit(
+            "Docker is unavailable. Start Docker Desktop before running tests.",
+            returncode=2,
+        )
 
     # In xdist, the config has "workerid" in workerinput
     workerinput = getattr(request.config, "workerinput", {})
@@ -291,13 +292,9 @@ def redis_container(request):
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
-    compose_file_name = "docker-compose.yml"
-    if platform.machine().lower() in {"arm64", "aarch64"}:
-        compose_file_name = "docker-compose.amd64.yml"
-
     compose = DockerCompose(
         context=current_dir,
-        compose_file_name=compose_file_name,
+        compose_file_name="docker-compose.yml",
         pull=True,
     )
 
@@ -308,8 +305,10 @@ def redis_container(request):
         # Attempt cleanup to avoid leaking containers/resources
         with contextlib.suppress(Exception):
             compose.stop()
-        yield None
-        return
+        pytest.exit(
+            "Isolated test Redis could not start. Check Docker logs; tests will not use the default database.",
+            returncode=2,
+        )
 
     yield compose
 
@@ -322,10 +321,10 @@ def redis_url(redis_container):
     Use the `DockerCompose` fixture to get host/port of the 'redis' service
     on container port 6379 (mapped to an ephemeral port on the host).
 
-    Returns None if Redis is not available (allows unit tests to run without Redis).
+    Refuse to continue without isolated test Redis.
     """
     if redis_container is None:
-        return None
+        pytest.exit("Isolated test Redis is unavailable.", returncode=2)
 
     host, port = redis_container.get_service_host_and_port("redis", 6379)
 
@@ -388,13 +387,13 @@ def mock_async_redis_client():
 def use_test_redis_connection(redis_url):
     """Replace the Redis connection with a test one.
 
-    If Redis is not available (redis_url is None), yields None to allow
-    unit tests that don't need Redis to run.
+    Refuse to continue without an isolated test URL.
     """
     if redis_url is None:
-        # Redis not available - allow unit tests to run without Redis
-        yield None
-        return
+        pytest.exit(
+            "Isolated test Redis URL is unavailable; refusing default database access.",
+            returncode=2,
+        )
 
     replacement_redis = AsyncRedis.from_url(redis_url)
 
@@ -463,6 +462,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    if (
+        config.getoption("--run-api-tests")
+        and not os.getenv("OPENAI_API_KEY", "").strip()
+    ):
+        raise pytest.UsageError(
+            "--run-api-tests requires OPENAI_API_KEY in the test environment. "
+            "Export it securely, or omit --run-api-tests for the standard suite. "
+            "Docker installer credentials are not loaded automatically."
+        )
     config.addinivalue_line(
         "markers",
         "requires_api_keys: mark test as requiring API keys",

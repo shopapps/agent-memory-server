@@ -44,6 +44,17 @@ make verify
 
 `make verify` requires `OPENAI_API_KEY` because it runs the API-key-dependent test suite.
 
+Tests start an isolated Redis 8.6 container using the machine's native architecture,
+including Apple Silicon Macs. Start Docker Desktop first. If test Redis cannot
+start, the run stops rather than falling back to the application's database.
+
+`make test-api` checks for a non-empty `OPENAI_API_KEY` before starting. Set it
+securely in the test shell; a key saved by the Docker installer is not automatically
+available there. These tests call OpenAI and may incur API charges. Use `make test`
+for the standard suite without API calls. If macOS blocks `make` pending Xcode
+licence acceptance, the equivalent commands from `V0/` are `uv run pytest` and
+`uv run pytest --run-api-tests`, after activating `.venv`.
+
 ## Contributing
 
 1. Fork the repository
